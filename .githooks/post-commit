@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# post-commit — attaches the SKIP_GATE bypass note to the commit that the
+# pre-commit hook approved (the sha does not exist at pre-commit time).
+# The note ref (refs/notes/bypasses) is the append-only shared audit trail;
+# gate_state.json is NOT the bypass log.
+set -u
+cd "$(git rev-parse --show-toplevel)"
+
+if [ -f .claude/.pending_bypass ]; then
+  reason="$(cat .claude/.pending_bypass)"
+  git notes --ref=bypasses add -f -m "SKIP_GATE bypass: ${reason}" HEAD
+  rm -f .claude/.pending_bypass
+  echo "Bypass note recorded on $(git rev-parse --short HEAD) (refs/notes/bypasses). Push propagates it via the configured refspec; /review will re-run the skipped gates."
+fi
+exit 0

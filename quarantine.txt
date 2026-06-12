@@ -1,0 +1,6 @@
+# quarantine.txt — committed flaky-test quarantine (Guide §6.2 T2).
+# Flaky tests are listed here with a linked issue — never deleted, never
+# retried-until-green. /review prints the count and covered modules on every
+# run. A quarantined test covering a CORE_FILES module (CLAUDE.md §5) is a
+# HARD STOP. Format, one per line:
+#   tests/<layer>/<module>.test.ts::<test name>  <issue-url>

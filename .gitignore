@@ -1,0 +1,25 @@
+# Dependencies / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Test artifacts
+coverage/
+
+# Secrets — NEVER committed (CLAUDE.md §3)
+.env
+.env.*
+!.env.example
+.env.worktree
+*.pem
+
+# Agent stateful layer (per-clone, written by gate.sh / checkpoint writes)
+.claude/gate_state.json
+.claude/gate_state.json.tmp.*
+.claude/last_gate_report.txt
+.claude/.pending_bypass
+.claude/checkpoints/
+
+# OS / editor noise
+.DS_Store
+npm-debug.log*

@@ -1,0 +1,25 @@
+{
+  "name": "beam",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Beam — localhost HTTP replay over peer-to-peer data channels. Governed by CLAUDE.md.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "25.9.3",
+    "@vitest/coverage-v8": "4.1.8",
+    "eslint": "10.4.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.61.0",
+    "vitest": "4.1.8"
+  }
+}

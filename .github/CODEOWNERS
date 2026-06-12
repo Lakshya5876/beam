@@ -1,0 +1,11 @@
+# Governance trust root — every change to these paths requires human review
+# by a code owner on a protected branch (Guide §2.2.3 / §4.4 governance
+# evolution path). Replace the placeholder with the real owning team.
+CLAUDE.md                                   @beam-governance
+/.claude/settings.json                      @beam-governance
+/.githooks/                                 @beam-governance
+/.github/                                   @beam-governance
+/quarantine.txt                             @beam-governance
+v1_claude_code_development_guide_new.md     @beam-governance
+package.json                                @beam-governance
+package-lock.json                           @beam-governance

@@ -1,0 +1,70 @@
+# CI gate — the AUTHORITATIVE enforcement layer. A hook-stripped clone
+# (git -c core.hooksPath=/dev/null) still cannot merge unverified code,
+# because this job runs the same gate script on every PR.
+#
+# TRUST ROOT: CI never runs the PR branch's gate.sh. It verifies the PR's
+# committed .githooks/ against the tree recorded on protected main and then
+# executes MAIN'S copy. CI parity is only authoritative because the gate
+# script cannot be edited by the change under review.
+#
+# GOVERNANCE EVOLUTION PATH: .githooks/, CLAUDE.md, .claude/settings.json and
+# this workflow are CODEOWNERS-gated (see .github/CODEOWNERS) and change only
+# via human-reviewed PR to the protected branch. The authoritative hooks
+# baseline is whatever origin/main holds AFTER an approved merge — never a
+# self-referential file inside the PR under review.
+name: gate
+on:
+  pull_request:
+  push:
+    branches-ignore: [main, master, develop]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch bypass audit trail
+        run: git fetch origin 'refs/notes/*:refs/notes/*' || true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify hooks against protected main, then run MAIN'S gate
+        run: |
+          set -euo pipefail
+          git fetch origin main || true
+          MAIN_HOOKS="$(git rev-parse origin/main:.githooks 2>/dev/null || echo NONE)"
+          PR_HOOKS="$(git rev-parse HEAD:.githooks)"
+          if [ "$MAIN_HOOKS" = "NONE" ]; then
+            echo "Bootstrap: no .githooks on main yet — the first approved governance merge establishes the baseline."
+            mkdir -p /tmp/trusted && cp .githooks/gate.sh /tmp/trusted/gate.sh
+          elif [ "$MAIN_HOOKS" != "$PR_HOOKS" ]; then
+            echo "::error::.githooks/ differs from protected main. Governance changes require a CODEOWNERS-approved PR merged to main FIRST; CI refuses to execute hooks modified by the change under review."
+            exit 1
+          else
+            mkdir -p /tmp/trusted
+            git show origin/main:.githooks/gate.sh > /tmp/trusted/gate.sh
+          fi
+          chmod +x /tmp/trusted/gate.sh
+          /tmp/trusted/gate.sh full
+
+      - name: Enforce bypass 24h deadline (committer dates)
+        run: |
+          set -euo pipefail
+          now=$(date +%s)
+          git notes --ref=bypasses list 2>/dev/null | while read -r _note commit; do
+            [ -z "$commit" ] && continue
+            git merge-base --is-ancestor "$commit" HEAD 2>/dev/null || continue
+            ct=$(git show -s --format=%ct "$commit")
+            if [ $(( now - ct )) -gt 86400 ]; then
+              echo "::error::Bypass on ${commit} expired (>24h by committer date) without a clean gate re-run."
+              exit 1
+            fi
+          done
