@@ -120,6 +120,7 @@ CORE_FILES:
   src/domain/**          # entities, value objects, interfaces
   src/composition.ts     # DI wiring / composition root
   tests/fixtures/**      # shared test fixtures
+  src/application/protocol.ts
 ```
 
 The list grows as the dependency graph grows (any module imported by >5
