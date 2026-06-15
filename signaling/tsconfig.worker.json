@@ -1,10 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "lib": ["ES2023"],
-    "types": ["node"],
+    "types": [],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -15,7 +15,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
-  "//": "Node-typed pass: pure modules + tests. The Worker entry and DO use Workers globals and are checked by tsconfig.worker.json instead.",
-  "exclude": ["src/worker.ts", "src/session-do.ts"]
+  "//": "Workers-runtime pass: the Worker entry + Durable Object + the pure modules they import, typed against the wrangler-generated runtime globals (no @types/node).",
+  "include": ["src/**/*.ts", "worker-configuration.d.ts"]
 }

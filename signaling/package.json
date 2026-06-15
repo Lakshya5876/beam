@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Beam signaling matchmaker — Cloudflare Worker + Durable Object. Isolated from the core beam package (own lockfile). Governed by ../CLAUDE.md.",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "test": "vitest run"
   },
   "devDependencies": {

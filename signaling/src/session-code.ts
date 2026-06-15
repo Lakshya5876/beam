@@ -23,7 +23,9 @@ export type RandomBytes = (length: number) => Uint8Array;
 
 const cryptoRandom: RandomBytes = (length) => {
   const bytes = new Uint8Array(length);
-  globalThis.crypto.getRandomValues(bytes);
+  // Bare global `crypto` — Web Crypto, present in both Node 22 and the Workers
+  // runtime (and declared by both @types/node and the generated Worker types).
+  crypto.getRandomValues(bytes);
   return bytes;
 };
 
