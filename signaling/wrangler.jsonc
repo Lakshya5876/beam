@@ -1,0 +1,16 @@
+{
+  // Beam signaling Worker config. SCAFFOLD: main (src/worker.ts) and the
+  // SessionDurableObject class are implemented in S14b — `wrangler deploy
+  // --dry-run` is validated there, once the entry + DO class exist. Deploy
+  // itself is a human-only action (LOCAL-ONLY, CLAUDE.md §3).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "beam-signaling",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-06-01",
+  // One Durable Object instance per session code; pairs host + viewer and
+  // relays SDP/ICE opaquely. SQLite-backed to stay on the free tier.
+  "durable_objects": {
+    "bindings": [{ "name": "SESSIONS", "class_name": "SessionDurableObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SessionDurableObject"] }]
+}

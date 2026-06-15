@@ -1,0 +1,17 @@
+{
+  "name": "beam-signaling",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Beam signaling matchmaker — Cloudflare Worker + Durable Object. Isolated from the core beam package (own lockfile). Governed by ../CLAUDE.md.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.3",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8",
+    "wrangler": "4.100.0"
+  }
+}
