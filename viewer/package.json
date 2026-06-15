@@ -1,0 +1,18 @@
+{
+  "name": "beam-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Beam viewer — browser bootstrap + service worker. Isolated package (own lockfile/bundler) that imports the CORE shared protocol read-only. Governed by ../CLAUDE.md.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "4.1.8",
+    "typescript": "6.0.3",
+    "vite": "8.0.16",
+    "vitest": "4.1.8"
+  }
+}
