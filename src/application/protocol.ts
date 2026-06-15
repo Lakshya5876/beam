@@ -81,10 +81,16 @@ export function isStreamLimitError(value: unknown): value is StreamLimitError {
   return typeof value === 'object' && value !== null && (value as StreamLimitError).error === 'StreamLimitReached';
 }
 
-type StreamPhase = 'open' | 'closed';
-
+/**
+ * Half-close model: a stream has two independently-closeable halves so a
+ * request and its response can share one stream id. An end frame RECEIVED
+ * closes the inbound half (and releases its buffered bytes); an end frame SENT
+ * closes the outbound half. The stream is LIVE while either half is open and
+ * fully retired only when both are closed.
+ */
 interface StreamState {
-  phase: StreamPhase;
+  inboundOpen: boolean;
+  outboundOpen: boolean;
   bufferedBytes: number;
 }
 
@@ -121,14 +127,18 @@ export class StreamMultiplexer {
       return err({ error: 'StreamLimitReached', limit: this.nextId, reason: 'id-space-exhausted' });
     }
     this.nextId += 1;
-    this.streams.set(id, { phase: 'open', bufferedBytes: 0 });
+    this.streams.set(id, { inboundOpen: true, outboundOpen: true, bufferedBytes: 0 });
     return ok(id);
   }
 
-  /** Write an outbound frame for an open stream; updates backpressure. */
+  /**
+   * Write an outbound frame; succeeds while the OUTBOUND half is open —
+   * including after the inbound half closed (a response on the same stream id
+   * after REQUEST_END). Sending an end frame closes the outbound half.
+   */
   writeFrame(frame: Frame): Result<undefined, StreamRejectedError | TransportClosedError> {
     const stream = this.streams.get(frame.streamId);
-    if (!stream || stream.phase !== 'open') {
+    if (!stream || !stream.outboundOpen) {
       return err({ error: 'StreamRejected', streamId: frame.streamId, reason: 'not-open' });
     }
     const sent = this.transport.send(frame);
@@ -136,7 +146,7 @@ export class StreamMultiplexer {
       return sent;
     }
     if (isEndFrame(frame.type)) {
-      this.closeStream(frame.streamId);
+      stream.outboundOpen = false;
     }
     this.updateBackpressure();
     return ok();
@@ -170,11 +180,11 @@ export class StreamMultiplexer {
     return this.paused;
   }
 
-  /** Count of currently-open streams (closed ids are excluded). */
+  /** Count of LIVE streams — either half open. Fully-retired ids excluded. */
   openCount(): number {
     let count = 0;
     for (const stream of this.streams.values()) {
-      if (stream.phase === 'open') {
+      if (stream.inboundOpen || stream.outboundOpen) {
         count += 1;
       }
     }
@@ -188,7 +198,9 @@ export class StreamMultiplexer {
   private routeInbound(frame: Frame): Result<undefined, StreamRejectedError> {
     const id = frame.streamId;
     const existing = this.streams.get(id);
-    if (existing?.phase === 'closed') {
+    // The INBOUND half being closed rejects further inbound frames; an
+    // outbound-closed (but inbound-open) stream still accepts inbound.
+    if (existing && !existing.inboundOpen) {
       return err({ error: 'StreamRejected', streamId: id, reason: 'closed' });
     }
     if (!existing) {
@@ -205,7 +217,7 @@ export class StreamMultiplexer {
       this.emitError(id, 'concurrency-cap');
       return err({ error: 'StreamRejected', streamId: id, reason: 'concurrency-cap' });
     }
-    this.streams.set(id, { phase: 'open', bufferedBytes: 0 });
+    this.streams.set(id, { inboundOpen: true, outboundOpen: true, bufferedBytes: 0 });
     return ok();
   }
 
@@ -224,24 +236,38 @@ export class StreamMultiplexer {
     stream.bufferedBytes += size;
     this.totalBuffered += size;
     if (isEndFrame(frame.type)) {
-      this.closeStream(id);
+      this.closeInbound(id);
     }
     return ok();
   }
 
   private terminate(id: StreamId, reason: StreamRejectionReason): Result<undefined, StreamRejectedError> {
     this.emitError(id, reason);
-    this.closeStream(id);
+    this.forceClose(id);
     return err({ error: 'StreamRejected', streamId: id, reason });
   }
 
-  private closeStream(id: StreamId): void {
+  /** Close the inbound half: release its buffered bytes exactly once. */
+  private closeInbound(id: StreamId): void {
     const stream = this.streams.get(id);
     if (!stream) {
       return;
     }
     this.totalBuffered -= stream.bufferedBytes;
-    this.streams.set(id, { phase: 'closed', bufferedBytes: 0 });
+    stream.bufferedBytes = 0;
+    stream.inboundOpen = false;
+  }
+
+  /** Fully retire a stream (cap breach / teardown): both halves closed. */
+  private forceClose(id: StreamId): void {
+    const stream = this.streams.get(id);
+    if (!stream) {
+      return;
+    }
+    this.totalBuffered -= stream.bufferedBytes;
+    stream.bufferedBytes = 0;
+    stream.inboundOpen = false;
+    stream.outboundOpen = false;
   }
 
   private emitError(streamId: StreamId, reason: string): void {

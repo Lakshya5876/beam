@@ -188,15 +188,71 @@ describe('inbound demultiplexing and stream-id hygiene', () => {
     expect(transport.errorFrames().map((f) => f.streamId)).toEqual([2]);
   });
 
-  it('REQUEST_END closes the stream and a later frame on it is rejected as closed', () => {
+  it('REQUEST_END closes only the inbound half — later inbound is rejected, the stream stays live', () => {
     const mux = new StreamMultiplexer(new FakeTransport());
     expect(mux.acceptInbound(frame(FrameType.REQUEST_HEAD, 7)).ok).toBe(true);
     expect(mux.acceptInbound(frame(FrameType.REQUEST_END, 7)).ok).toBe(true);
-    expect(mux.openCount()).toBe(0);
+    // A later INBOUND frame is rejected — the inbound half is closed.
     const afterEnd = mux.acceptInbound(frame(FrameType.REQUEST_BODY_CHUNK, 7));
     expect(afterEnd.ok).toBe(false);
     if (!afterEnd.ok) {
       expect(afterEnd.error.reason).toBe('closed');
+    }
+    // Half-close: the stream is still LIVE (outbound half open), so openCount
+    // is 1 (was 0 under the old full-close-on-END semantics) and the response
+    // can still be written on the same id.
+    expect(mux.openCount()).toBe(1);
+    expect(mux.writeFrame(frame(FrameType.RESPONSE_HEAD, 7)).ok).toBe(true);
+  });
+});
+
+describe('half-close lifecycle', () => {
+  it('writes a full response on the same stream id after REQUEST_END, then RESPONSE_END retires it', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    expect(mux.acceptInbound(frame(FrameType.REQUEST_HEAD, 7)).ok).toBe(true);
+    expect(mux.acceptInbound(frame(FrameType.REQUEST_END, 7)).ok).toBe(true);
+    expect(mux.writeFrame(frame(FrameType.RESPONSE_HEAD, 7)).ok).toBe(true);
+    expect(mux.writeFrame(frame(FrameType.RESPONSE_BODY_CHUNK, 7)).ok).toBe(true);
+    // Outbound half still open after non-end frames → still live.
+    expect(mux.openCount()).toBe(1);
+    // RESPONSE_END closes the outbound half → both halves closed → retired.
+    expect(mux.writeFrame(frame(FrameType.RESPONSE_END, 7)).ok).toBe(true);
+    expect(mux.openCount()).toBe(0);
+    // A further write on the retired id is rejected not-open.
+    const afterRetire = mux.writeFrame(frame(FrameType.RESPONSE_BODY_CHUNK, 7));
+    expect(afterRetire.ok).toBe(false);
+    if (!afterRetire.ok && isStreamRejectedError(afterRetire.error)) {
+      expect(afterRetire.error.reason).toBe('not-open');
+    }
+    expect(transport.sent.map((f) => f.type)).toEqual([
+      FrameType.RESPONSE_HEAD,
+      FrameType.RESPONSE_BODY_CHUNK,
+      FrameType.RESPONSE_END,
+    ]);
+  });
+
+  it('symmetric: a locally-opened stream that sends REQUEST_END still accepts inbound responses until RESPONSE_END', () => {
+    const mux = new StreamMultiplexer(new FakeTransport());
+    const opened = mux.openStream();
+    if (!opened.ok) {
+      throw new Error('setup: openStream');
+    }
+    const id = opened.value;
+    expect(mux.writeFrame(frame(FrameType.REQUEST_HEAD, id)).ok).toBe(true);
+    expect(mux.writeFrame(frame(FrameType.REQUEST_END, id)).ok).toBe(true);
+    // Outbound half closed: a further outbound write is rejected not-open.
+    expect(mux.writeFrame(frame(FrameType.REQUEST_BODY_CHUNK, id)).ok).toBe(false);
+    // Inbound half still open: responses are still accepted, stream still live.
+    expect(mux.openCount()).toBe(1);
+    expect(mux.acceptInbound(frame(FrameType.RESPONSE_HEAD, id)).ok).toBe(true);
+    expect(mux.acceptInbound(frame(FrameType.RESPONSE_END, id)).ok).toBe(true);
+    // Both halves closed → retired; a new inbound frame is rejected 'closed'.
+    expect(mux.openCount()).toBe(0);
+    const afterRetire = mux.acceptInbound(frame(FrameType.RESPONSE_BODY_CHUNK, id));
+    expect(afterRetire.ok).toBe(false);
+    if (!afterRetire.ok) {
+      expect(afterRetire.error.reason).toBe('closed');
     }
   });
 });

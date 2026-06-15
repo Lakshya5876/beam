@@ -27,7 +27,7 @@ import {
   type Unsubscribe,
 } from '../src/domain/interfaces.js';
 import type { PeerConnectFailedError, PeerSignalingError } from '../src/infrastructure/peer-connection.js';
-import { StreamMultiplexer } from '../src/application/protocol.js';
+import { DEFAULT_MULTIPLEXER_LIMITS, StreamMultiplexer } from '../src/application/protocol.js';
 import { ExecuteRelayUseCase, encodeRequestHead } from '../src/application/relay-use-case.js';
 import { ExecuteSessionUseCase } from '../src/application/session-use-case.js';
 import { RecordRequestUseCase } from '../src/application/diagnostics-use-case.js';
@@ -172,8 +172,12 @@ class FakePeerTransport implements PeerTransport {
   close(): void {
     /* no-op */
   }
+  public buffered = 0;
   bufferedAmount(): number {
-    return 0;
+    return this.buffered;
+  }
+  setBuffered(n: number): void {
+    this.buffered = n;
   }
   emit(frame: Frame): void {
     this.handler?.(frame);
@@ -289,18 +293,20 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
     const mux = new StreamMultiplexer(transport);
     const { client, calls } = makeReplayClient(() => ok({ status: 200, headers: {}, body: new TextEncoder().encode('ok') }));
     const repo = new FakeRequestLogRepository();
-    runRelayLoop(mux, {
-      transport,
+    runRelayLoop({
+      mux,
       relay: new ExecuteRelayUseCase(client),
       recorder: new RecordRequestUseCase(repo, () => 42),
       allowedPaths: ['/api'],
       now: () => 42,
+      waitForDrain: () => Promise.resolve(),
     });
     for (const frame of requestFrames(1, '/api/items')) {
       transport.emit(frame);
     }
     await flush();
     expect(calls).toHaveLength(1);
+    // Responses now flow through mux.writeFrame -> transport.send (still observed here).
     expect(transport.sent.map((f) => f.type)).toEqual([FrameType.RESPONSE_HEAD, FrameType.RESPONSE_BODY_CHUNK, FrameType.RESPONSE_END]);
     expect(repo.records[0]?.status).toBe(200);
   });
@@ -310,12 +316,13 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
     const mux = new StreamMultiplexer(transport);
     const { client, calls } = makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) }));
     const repo = new FakeRequestLogRepository();
-    runRelayLoop(mux, {
-      transport,
+    runRelayLoop({
+      mux,
       relay: new ExecuteRelayUseCase(client),
       recorder: new RecordRequestUseCase(repo, () => 0),
       allowedPaths: ['/api'],
       now: () => 0,
+      waitForDrain: () => Promise.resolve(),
     });
     for (const frame of requestFrames(2, '/apifoo')) {
       transport.emit(frame);
@@ -324,6 +331,43 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
     expect(calls).toHaveLength(0);
     expect(repo.records[0]?.status).toBe(403);
     expect(transport.sent[0]?.type).toBe(FrameType.RESPONSE_HEAD);
+  });
+
+  it('honors backpressure: defers response writes past the high-water mark until drain', async () => {
+    const transport = new FakePeerTransport();
+    // High-water 1: the very first response write trips pause.
+    const mux = new StreamMultiplexer(transport, { ...DEFAULT_MULTIPLEXER_LIMITS, highWaterMark: 1, lowWaterMark: 0 });
+    const { client } = makeReplayClient(() => ok({ status: 200, headers: {}, body: new TextEncoder().encode('a-body') }));
+    const repo = new FakeRequestLogRepository();
+    let releaseDrain: () => void = () => undefined;
+    const drained: Promise<void> = new Promise((resolve) => {
+      releaseDrain = resolve;
+    });
+    runRelayLoop({
+      mux,
+      relay: new ExecuteRelayUseCase(client),
+      recorder: new RecordRequestUseCase(repo, () => 0),
+      allowedPaths: [],
+      now: () => 0,
+      waitForDrain: () => drained,
+    });
+    transport.setBuffered(1000); // above high-water → first write pauses
+    for (const frame of requestFrames(3, '/x')) {
+      transport.emit(frame);
+    }
+    await flush();
+    // Deferred mid-response: RESPONSE_HEAD written, then paused before the rest.
+    expect(transport.sent.map((f) => f.type)).toEqual([FrameType.RESPONSE_HEAD]);
+    expect(mux.isPaused()).toBe(true);
+    // Drain and release: the remaining frames flush.
+    transport.setBuffered(0);
+    releaseDrain();
+    await flush();
+    expect(transport.sent.map((f) => f.type)).toEqual([
+      FrameType.RESPONSE_HEAD,
+      FrameType.RESPONSE_BODY_CHUNK,
+      FrameType.RESPONSE_END,
+    ]);
   });
 });
 

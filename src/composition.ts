@@ -29,7 +29,7 @@ import {
   type PeerConnectFailedError,
   type PeerSignalingError,
 } from './infrastructure/peer-connection.js';
-import { StreamMultiplexer } from './application/protocol.js';
+import { LOW_WATER_MARK, StreamMultiplexer } from './application/protocol.js';
 import {
   assembleRequest,
   decodeResponseHead,
@@ -151,36 +151,46 @@ function responseStatus(frames: readonly Frame[]): number {
   return decoded.ok ? decoded.value.status : 502;
 }
 
-function sendFrames(transport: PeerTransport, frames: readonly Frame[]): void {
-  for (const frame of frames) {
-    transport.send(frame);
-  }
-}
-
 interface RelayDependencies {
-  readonly transport: PeerTransport;
+  readonly mux: StreamMultiplexer;
   readonly relay: ExecuteRelayUseCase;
   readonly recorder: RecordRequestUseCase;
   readonly allowedPaths: readonly string[];
   readonly now: () => number;
+  readonly waitForDrain: () => Promise<void>;
+}
+
+/**
+ * Write response frames through the mux (NOT transport.send) so they share the
+ * request's stream id (S4.1 half-close) and engage backpressure. When the mux
+ * signals pause (high-water), defer further writes until the channel drains —
+ * a large response no longer floods past the threshold.
+ */
+async function writeResponse(deps: RelayDependencies, frames: readonly Frame[]): Promise<void> {
+  for (const frame of frames) {
+    deps.mux.writeFrame(frame);
+    if (deps.mux.isPaused()) {
+      await deps.waitForDrain();
+    }
+  }
 }
 
 async function completeRequest(frames: Frame[], streamId: StreamId, deps: RelayDependencies): Promise<void> {
   const assembled = assembleRequest(frames);
   if (!assembled.ok) {
-    sendFrames(deps.transport, frameError(streamId, assembled.error.reason));
+    await writeResponse(deps, frameError(streamId, assembled.error.reason));
     return;
   }
   const request = assembled.value;
   if (!isPathAllowed(deps.allowedPaths, request.path)) {
     const denied = frameResponse(streamId, forbiddenResponse());
-    sendFrames(deps.transport, denied);
+    await writeResponse(deps, denied);
     await deps.recorder.record({ method: request.method, path: request.path, status: 403, latencyMs: 0, responseSizeBytes: responseSizeBytes(denied), streamId });
     return;
   }
   const startedAt = deps.now();
   const responseFrames = await deps.relay.execute(frames);
-  sendFrames(deps.transport, responseFrames);
+  await writeResponse(deps, responseFrames);
   await deps.recorder.record({
     method: request.method,
     path: request.path,
@@ -193,14 +203,13 @@ async function completeRequest(frames: Frame[], streamId: StreamId, deps: RelayD
 
 /**
  * Inbound REQUEST_* frames are demuxed by the StreamMultiplexer, accumulated
- * per stream until REQUEST_END, authorized, relayed, sent back, and recorded.
- * NOTE (S4 reconciliation): the mux closes a stream on REQUEST_END, so the
- * response is written on the same id via transport.send directly; integrating
- * outbound responses through the mux awaits an S4 half-close revision.
+ * per stream until REQUEST_END, authorized, relayed, and written back through
+ * the mux on the SAME stream id (half-close: the inbound half is closed but the
+ * outbound half stays open) with backpressure honored, then recorded.
  */
-export function runRelayLoop(mux: StreamMultiplexer, deps: RelayDependencies): Unsubscribe {
+export function runRelayLoop(deps: RelayDependencies): Unsubscribe {
   const pending = new Map<number, Frame[]>();
-  return mux.onInbound((frame) => {
+  return deps.mux.onInbound((frame) => {
     const list = pending.get(frame.streamId) ?? [];
     list.push(frame);
     pending.set(frame.streamId, list);
@@ -209,6 +218,20 @@ export function runRelayLoop(mux: StreamMultiplexer, deps: RelayDependencies): U
       void completeRequest(list, frame.streamId, deps);
     }
   });
+}
+
+const BACKPRESSURE_POLL_MS = 25;
+
+/** Poll-based drain: resolves once the channel's buffered bytes fall to the
+ *  low-water mark. Keys off the PeerTransport.bufferedAmount() seam — no new
+ *  interface method needed. */
+function pollDrain(transport: PeerTransport, lowWaterMark: number): () => Promise<void> {
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  return async (): Promise<void> => {
+    while (transport.bufferedAmount() > lowWaterMark) {
+      await sleep(BACKPRESSURE_POLL_MS);
+    }
+  };
 }
 
 export interface HostOptions {
@@ -240,7 +263,7 @@ export function composeHost(options: HostOptions, factories: HostFactories = rea
 
   forwardLocalSignals(peer, signaling);
   applyRemoteSignals(signaling, peer);
-  runRelayLoop(mux, { transport: peer, relay, recorder, allowedPaths: options.allowedPaths ?? [], now });
+  runRelayLoop({ mux, relay, recorder, allowedPaths: options.allowedPaths ?? [], now, waitForDrain: pollDrain(peer, LOW_WATER_MARK) });
 
   return {
     session,
