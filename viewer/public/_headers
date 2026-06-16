@@ -1,0 +1,6 @@
+/__beam/sw.js
+  Service-Worker-Allowed: /
+  Cache-Control: no-cache
+
+/
+  Cache-Control: no-cache, no-store

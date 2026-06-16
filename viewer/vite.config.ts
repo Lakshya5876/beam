@@ -6,11 +6,14 @@ import { resolve } from 'node:path';
 //
 // Two outputs:
 //   dist/index.html + assets/  — main app bundle (from index.html / src/main.ts)
-//   dist/sw.js                 — service worker (fixed filename, no content hash)
+//   dist/__beam/sw.js          — service worker (fixed path + filename, no content hash)
 //
-// S17 obligation: dist/sw.js must be served with the response header
-//   Service-Worker-Allowed: /
-// so the scope:'/' registration in bootstrap.ts succeeds without SecurityError.
+// The SW lives under dist/__beam/ so that when Pages serves dist/ at root /,
+// the SW is reachable at /__beam/sw.js — matching the register() call in
+// bootstrap.ts and the path-exclusion predicate in sw.ts (startsWith('/__beam/')).
+//
+// dist/public/_headers applies Service-Worker-Allowed: / to /__beam/sw.js so
+// the scope:'/' registration in bootstrap.ts succeeds without SecurityError.
 export default defineConfig({
   build: {
     outDir: 'dist',
@@ -22,8 +25,9 @@ export default defineConfig({
       },
       output: {
         entryFileNames: (chunk) => {
-          // Fixed filename for the SW — it must be at a stable URL for re-registration
-          if (chunk.name === 'sw') return 'sw.js';
+          // Fixed path+filename for SW: dist/__beam/sw.js → served at /__beam/sw.js by Pages.
+          // Must match bootstrap.ts register('/__beam/sw.js') and sw.ts exclusion predicate.
+          if (chunk.name === 'sw') return '__beam/sw.js';
           return 'assets/[name]-[hash].js';
         },
       },
