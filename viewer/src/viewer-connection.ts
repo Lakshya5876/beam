@@ -4,8 +4,10 @@
  * pure logic, testable with fakes; browser runtime at S18.
  */
 
-import type { Unsubscribe } from '../../src/domain/interfaces.js';
+import type { PeerTransport, Unsubscribe } from '../../src/domain/interfaces.js';
 import { parseMessage, serializeMessage, type IceCandidate } from './signaling-messages.js';
+import { createViewerMultiplexer } from './protocol-bridge.js';
+import type { StreamMultiplexer } from './protocol-bridge.js';
 
 export interface BrowserPeer {
   applyRemoteDescription(sdp: string): Promise<void>;
@@ -32,6 +34,12 @@ export class ViewerConnection {
   private pendingCandidates: IceCandidate[] = [];
   private connectionState: ConnectionState = 'connecting';
   private stateHandlers: Array<(state: ConnectionState) => void> = [];
+  private muxHandlers: Array<(mux: StreamMultiplexer) => void> = [];
+  private closeHandlers: Array<(openStreamIds: number[]) => void> = [];
+
+  // C2: viewer-side open stream tracking (StreamMultiplexer.streams is private)
+  private trackedStreamIds: Set<number> = new Set();
+  private mux: StreamMultiplexer | null = null;
 
   constructor(
     private peer: BrowserPeer,
@@ -48,8 +56,8 @@ export class ViewerConnection {
     this.peer.onconnectionstatechange(() => {
       this.handleConnectionStateChange();
     });
-    this.peer.ondatachannel(() => {
-      // S16: data channel handling
+    this.peer.ondatachannel((channel) => {
+      this.handleDataChannel(channel as RTCDataChannel);
     });
   }
 
@@ -62,9 +70,32 @@ export class ViewerConnection {
     });
   }
 
+  private handleDataChannel(channel: RTCDataChannel): void {
+    // Lazy import to avoid pulling browser-datachannel into pure tests
+    // The cast is safe: ondatachannel is only called in a real browser context (S18)
+    import('./browser-datachannel.js').then(({ BrowserDataChannelAdapter }) => {
+      const transport: PeerTransport = new BrowserDataChannelAdapter(channel);
+      const mux = createViewerMultiplexer(transport);
+      this.mux = mux;
+
+      // N3: on transport close, emit open stream IDs so bootstrap can send relay-errors
+      transport.onClose(() => {
+        const openIds = [...this.trackedStreamIds];
+        for (const handler of this.closeHandlers) {
+          handler(openIds);
+        }
+        this.trackedStreamIds.clear();
+      });
+
+      for (const handler of this.muxHandlers) {
+        handler(mux);
+      }
+    }).catch(() => undefined);
+  }
+
   private async handleSignalingMessage(text: string): Promise<void> {
     const msg = parseMessage(text);
-    if (!msg) return; // Malformed, dropped
+    if (!msg) return;
 
     if (msg.kind === 'offer') {
       await this.handleOffer(msg.payload as string);
@@ -102,9 +133,22 @@ export class ViewerConnection {
   }
 
   private handleConnectionStateChange(): void {
-    // Inspect peer.connectionState (mapped to our ConnectionState)
-    // Update this.connectionState
-    // Emit via stateHandlers
+    // Connection state transitions surfaced via callback (S18: real RTCPeerConnection state)
+  }
+
+  /** C2: register a relay stream as open (called by bootstrap when relaying a request). */
+  trackStream(streamId: number): void {
+    this.trackedStreamIds.add(streamId);
+  }
+
+  /** C2: deregister a relay stream (called by bootstrap when response completes). */
+  untrackStream(streamId: number): void {
+    this.trackedStreamIds.delete(streamId);
+  }
+
+  /** C2: return open relay stream IDs. Used by bootstrap to emit relay-errors on disconnect. */
+  openStreamIds(): number[] {
+    return [...this.trackedStreamIds];
   }
 
   onconnectionstate(handler: (state: ConnectionState) => void): Unsubscribe {
@@ -112,6 +156,24 @@ export class ViewerConnection {
     return () => {
       const idx = this.stateHandlers.indexOf(handler);
       if (idx >= 0) this.stateHandlers.splice(idx, 1);
+    };
+  }
+
+  /** B1: fires when the data channel is open and the mux is ready. */
+  onmux(handler: (mux: StreamMultiplexer) => void): Unsubscribe {
+    this.muxHandlers.push(handler);
+    return () => {
+      const idx = this.muxHandlers.indexOf(handler);
+      if (idx >= 0) this.muxHandlers.splice(idx, 1);
+    };
+  }
+
+  /** N3: fires with open streamIds on transport close, so bootstrap can emit relay-errors. */
+  onclose(handler: (openStreamIds: number[]) => void): Unsubscribe {
+    this.closeHandlers.push(handler);
+    return () => {
+      const idx = this.closeHandlers.indexOf(handler);
+      if (idx >= 0) this.closeHandlers.splice(idx, 1);
     };
   }
 

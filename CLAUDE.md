@@ -14,6 +14,38 @@ Stack: TypeScript (strict) on Node >= 22. Tests: vitest. Lint: eslint
 
 ---
 
+## 0. COGNITIVE ROUTING & CONTEXT DIET
+
+1. **MODEL INTERCEPT** — Before writing code or reading files, classify task complexity:
+   - Low (formatting, simple tests, boilerplate) → Haiku
+   - Medium (standard features, multi-file edits) → Sonnet
+   - High (architecture, design choices, deep refactoring) → Opus
+   Ambiguity about architectural impact → default Sonnet or higher.
+
+2. **HALT & ASK** — Output only:
+   `Classification: [Tier]. Recommended model: [Model]. Please run /model <name> and reply approved.`
+   Do NOT execute until approved.
+
+3. **PRUNING** — Never `cat` files over 100 lines. Use `grep -n`, `rg`, or targeted `sed` for specific function windows.
+
+4. **FLUSH** — On task completion, instruct: "Task complete. Run `/clear` to flush session."
+
+---
+
+## 0.1 STRUCTURAL GRAPH MEMORY PROTOCOL
+
+1. **GRAPH-FIRST SEARCH** — Do not use `cat`, `grep`, or `rg` for broad codebase
+   exploration. Prefer graph tools when available.
+2. **BLAST RADIUS ANALYSIS** — For feature changes, bug fixes, or reviews, use
+   `get_impact_radius_tool`, `query_graph_tool`, or `get_review_context_tool`
+   (via the code-review-graph MCP server) to scope impact before reading files.
+3. **MINIMAL CONTEXT** — Load only the specific functions/classes returned by the
+   blast-radius query. Never load full files unless explicitly instructed.
+
+*Prerequisite: code-review-graph MCP server must be installed and running.*
+
+---
+
 ## 1. ARCHITECTURE ENFORCEMENT (NON-NEGOTIABLE)
 
 This codebase follows Clean Architecture. Layer boundaries are
