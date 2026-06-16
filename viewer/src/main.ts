@@ -18,6 +18,7 @@ import {
   isInvalidStreamIdError,
   isPayloadTooLargeError,
 } from './protocol-bridge.js';
+import { bootstrap } from './bootstrap.js';
 
 /** Startup self-check: a frame round-trips through the SHARED codec. */
 function sharedProtocolReady(): boolean {
@@ -43,6 +44,10 @@ if (root) {
   } else if (!protocolReady) {
     root.textContent = 'Internal error: shared protocol failed self-check.';
   } else {
-    root.textContent = 'Browser supported — connecting…';
+    // S15b: bootstrap the viewer connection orchestration
+    const signalingBaseUrl = new URL(document.location.href).searchParams.get('signaling') || 'ws://localhost:8081';
+    bootstrap(signalingBaseUrl).catch((err) => {
+      if (root) root.textContent = `Bootstrap failed: ${err instanceof Error ? err.message : String(err)}`;
+    });
   }
 }
