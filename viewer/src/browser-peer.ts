@@ -39,9 +39,9 @@ export class BrowserPeerAdapter implements BrowserPeer {
     };
   }
 
-  onconnectionstatechange(handler: () => void): void {
+  onconnectionstatechange(handler: (state: string) => void): void {
     this.pc.onconnectionstatechange = () => {
-      handler();
+      handler(this.pc.connectionState);
     };
   }
 

@@ -10,7 +10,7 @@ class FakeBrowserPeer implements BrowserPeer {
   public closeCalls = 0;
 
   private icecandidateHandlers: Array<(candidate: IceCandidate) => void> = [];
-  private connectionStateChangeHandlers: Array<() => void> = [];
+  private connectionStateChangeHandlers: Array<(state: string) => void> = [];
 
   async applyRemoteDescription(sdp: string): Promise<void> {
     this.applyRemoteDescriptionCalls.push(sdp);
@@ -33,7 +33,7 @@ class FakeBrowserPeer implements BrowserPeer {
     this.icecandidateHandlers.push(handler);
   }
 
-  onconnectionstatechange(handler: () => void): void {
+  onconnectionstatechange(handler: (state: string) => void): void {
     this.connectionStateChangeHandlers.push(handler);
   }
 
@@ -52,9 +52,9 @@ class FakeBrowserPeer implements BrowserPeer {
     }
   }
 
-  triggerConnectionStateChange(): void {
+  triggerConnectionStateChange(state: string): void {
     for (const handler of this.connectionStateChangeHandlers) {
-      handler();
+      handler(state);
     }
   }
 }
@@ -171,7 +171,13 @@ describe('ViewerConnection (orchestration + candidate buffering)', () => {
     const states: Array<'connecting' | 'connected' | 'failed'> = [];
     conn.onconnectionstate((state) => states.push(state));
 
-    peer.triggerConnectionStateChange();
-    // Connection state handling deferred to implementation phase
+    peer.triggerConnectionStateChange('connected');
+    expect(states).toEqual(['connected']);
+
+    peer.triggerConnectionStateChange('failed');
+    expect(states).toEqual(['connected', 'failed']);
+
+    peer.triggerConnectionStateChange('disconnected');
+    expect(states).toEqual(['connected', 'failed', 'failed']);
   });
 });

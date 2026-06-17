@@ -146,16 +146,19 @@ export class PeerConnectionTransport implements PeerTransport {
 
   private wirePeerConnection(): void {
     this.pc.onLocalDescription((sdp, type) => {
+      console.log(`[HOST-PC] localDescription type=${type} sdp.length=${sdp.length}`);
       for (const handler of this.localDescriptionHandlers) {
         handler(sdp, type);
       }
     });
     this.pc.onLocalCandidate((candidate, mid) => {
+      console.log(`[HOST-PC] localCandidate mid=${mid} ${candidate.slice(0, 80)}`);
       for (const handler of this.localCandidateHandlers) {
         handler(candidate, mid);
       }
     });
     this.pc.onStateChange((state) => {
+      console.log(`[HOST-PC] peerState=${state}`);
       this.handleStateChange(state);
     });
     this.pc.onDataChannel((channel) => {
@@ -165,11 +168,14 @@ export class PeerConnectionTransport implements PeerTransport {
 
   /** Begin the connection attempt. Offerer creates the channel (kicks ICE). */
   start(): void {
+    console.log(`[HOST-PC] start role=${this.role} timeout=${this.connectTimeoutMs}ms`);
     this.connectTimer = setTimeout(() => {
+      console.log('[HOST-PC] connect TIMEOUT');
       this.settleConnect(err({ error: 'PeerConnectFailed', reason: 'connect-timeout' }));
     }, this.connectTimeoutMs);
     if (this.role === 'offer') {
       try {
+        console.log('[HOST-PC] createDataChannel');
         this.adoptChannel(this.pc.createDataChannel('beam'));
       } catch {
         this.settleConnect(err({ error: 'PeerConnectFailed', reason: 'closed-before-open' }));
@@ -180,14 +186,17 @@ export class PeerConnectionTransport implements PeerTransport {
   private adoptChannel(channel: NativeDataChannel): void {
     this.channel = channel;
     channel.onOpen(() => {
+      console.log('[HOST-PC] DataChannel OPEN');
       this.channelOpen = true;
       this.settleConnect(ok());
     });
     channel.onClosed(() => {
+      console.log('[HOST-PC] DataChannel CLOSED');
       this.channelOpen = false;
       this.fireClose('data channel closed');
     });
     channel.onError((reason) => {
+      console.log(`[HOST-PC] DataChannel ERROR: ${reason}`);
       this.fireClose(reason);
     });
     channel.onMessage((msg) => {
@@ -265,12 +274,15 @@ export class PeerConnectionTransport implements PeerTransport {
   }
 
   applyRemoteDescription(sdp: string, type: string): Result<undefined, PeerSignalingError> {
+    console.log(`[HOST-PC] applyRemoteDescription type=${type} sdp.length=${sdp.length}`);
     try {
       this.pc.setRemoteDescription(sdp, type);
     } catch {
+      console.log('[HOST-PC] applyRemoteDescription FAILED');
       return err(signalingError('apply-remote-description-failed'));
     }
     this.remoteDescriptionApplied = true;
+    console.log(`[HOST-PC] flushing ${String(this.pendingCandidates.length)} buffered candidates`);
     for (const pending of this.pendingCandidates) {
       this.guardedAddCandidate(pending.candidate, pending.mid);
     }
@@ -279,6 +291,7 @@ export class PeerConnectionTransport implements PeerTransport {
   }
 
   addRemoteCandidate(candidate: string, mid: string): Result<undefined, PeerSignalingError> {
+    console.log(`[HOST-PC] addRemoteCandidate buffered=${!this.remoteDescriptionApplied} ${candidate.slice(0, 80)}`);
     if (!this.remoteDescriptionApplied) {
       // Buffer until the remote description is applied — a candidate passed to
       // the native layer first aborts the process.

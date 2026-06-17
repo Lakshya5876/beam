@@ -20,10 +20,12 @@ import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.
 import type { StreamMultiplexer } from './protocol-bridge.js';
 
 export async function bootstrap(signalingBaseUrl: string): Promise<void> {
+  console.log(`[VIEWER-BOOT] bootstrap() signalingBaseUrl=${signalingBaseUrl}`);
   const root = document.getElementById('beam-root');
   if (!root) return;
 
   const verdict = detectSupport(readBrowserCapabilities());
+  console.log(`[VIEWER-BOOT] feature detection: supported=${String(verdict.supported)}`);
   if (!verdict.supported) {
     root.textContent = renderUnsupported(verdict.missing);
     return;
@@ -35,13 +37,19 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // Requires Service-Worker-Allowed: / header on /__beam/sw.js (S17 obligation).
   if (navigator.serviceWorker) {
     try {
+      console.log('[VIEWER-BOOT] registering SW /__beam/sw.js');
       await navigator.serviceWorker.register('/__beam/sw.js', { scope: '/', type: 'module' });
-    } catch {
+      console.log('[VIEWER-BOOT] SW registered');
+    } catch (e) {
+      console.log('[VIEWER-BOOT] SW registration FAILED:', e);
       // SW registration failed; relay will not work but connection attempt continues
     }
+  } else {
+    console.log('[VIEWER-BOOT] navigator.serviceWorker unavailable');
   }
 
   const sessionCode = extractSessionCode();
+  console.log(`[VIEWER-BOOT] sessionCode=${String(sessionCode)}`);
   if (!sessionCode) {
     root.textContent = renderFailed('no session code');
     return;
@@ -50,8 +58,14 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // Strip the session code from signalingBaseUrl (which may be a full URL including the code)
   // to avoid duplicating the code when calling buildViewerSignalingUrl
   const base = signalingBaseUrl.replace(new RegExp(`/${sessionCode}$`), '');
+  const wsUrl = buildViewerSignalingUrl(base, sessionCode);
+  console.log(`[VIEWER-BOOT] base=${base} wsUrl=${wsUrl}`);
   const pc = new RTCPeerConnection();
-  const ws = new WebSocket(buildViewerSignalingUrl(base, sessionCode));
+  console.log('[VIEWER-BOOT] RTCPeerConnection created');
+  const ws = new WebSocket(wsUrl);
+  ws.addEventListener('open', () => { console.log('[VIEWER-BOOT] WS OPEN'); });
+  ws.addEventListener('close', (e) => { console.log(`[VIEWER-BOOT] WS CLOSE code=${String(e.code)} reason=${e.reason}`); });
+  ws.addEventListener('error', () => { console.log('[VIEWER-BOOT] WS ERROR'); });
 
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
