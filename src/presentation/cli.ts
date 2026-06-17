@@ -3,10 +3,9 @@
  * arg parsing + output formatting only; it composes via the composition root
  * and drives application use-cases — never infrastructure/domain concretes.
  *
- * NOTE: the live session start needs the signaling server (S14) to assign the
- * session code, and the end-to-end run is verified at S18. S12b delivers the
- * deterministic surface — arg parsing, the consent banner, composition wiring,
- * and SIGINT teardown — all unit-tested here without the network.
+ * run() stays synchronous and returns an exit code — existing tests cover the
+ * sync surface (parse errors, banner, SIGINT). The async session-start work
+ * (mint → start → print URL) is fired with `void` and verified live at S18.
  */
 
 import { parseArgs } from 'node:util';
@@ -26,16 +25,18 @@ function pErr<T>(error: CliUsageError): Parsed<T> {
 
 export type CliParseResult = Parsed<CliOptions>;
 
-// The deployed signaling endpoint is finalized when S14/S17 land; a constant
-// default keeps the CLI dependency- and env-free for now.
 export const DEFAULT_SIGNALING_URL = 'wss://signal.beam.workers.dev';
+export const DEFAULT_VIEWER_URL = 'https://beam-viewer.pages.dev';
 
-export const USAGE = 'usage: beam <port> [--allowed-paths /a,/b] [--ttl <seconds>]';
+export const USAGE =
+  'usage: beam <port> [--allowed-paths /a,/b] [--ttl <seconds>] [--signaling <url>] [--viewer <url>]';
 
 export interface CliOptions {
   readonly port: number;
   readonly allowedPaths: string[];
   readonly ttlMs?: number;
+  readonly signalingUrl?: string;
+  readonly viewerUrl?: string;
 }
 
 export interface CliUsageError {
@@ -74,7 +75,12 @@ export function parseCliArgs(argv: readonly string[]): CliParseResult {
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { 'allowed-paths': { type: 'string' }, ttl: { type: 'string' } },
+      options: {
+        'allowed-paths': { type: 'string' },
+        ttl: { type: 'string' },
+        signaling: { type: 'string' },
+        viewer: { type: 'string' },
+      },
       allowPositionals: true,
     });
   } catch {
@@ -90,8 +96,14 @@ export function parseCliArgs(argv: readonly string[]): CliParseResult {
   }
   const allowedRaw = parsed.values['allowed-paths'];
   const allowedPaths = allowedRaw ? allowedRaw.split(',').map((p) => p.trim()).filter((p) => p.length > 0) : [];
-  const base = { port: port.value, allowedPaths };
-  return pOk(ttl.value === undefined ? base : { ...base, ttlMs: ttl.value });
+  const base: CliOptions = {
+    port: port.value,
+    allowedPaths,
+    ...(ttl.value !== undefined && { ttlMs: ttl.value }),
+    ...(parsed.values.signaling !== undefined && { signalingUrl: parsed.values.signaling }),
+    ...(parsed.values.viewer !== undefined && { viewerUrl: parsed.values.viewer }),
+  };
+  return pOk(base);
 }
 
 export function securityBanner(options: CliOptions): string {
@@ -125,9 +137,45 @@ function defaultIO(): CliIO {
 }
 
 /**
- * Parse, warn, compose, and wire teardown. Returns a process exit code.
- * The live session start (awaiting a server-assigned code) is wired in at
- * S17 and verified end-to-end at S18.
+ * Mint a session code, start the runtime, and print the viewer URL.
+ * Runs asynchronously after run() returns — errors are written to io.error,
+ * never thrown to the caller.
+ */
+async function startSession(runtime: HostRuntime, signalingUrl: string, viewerUrl: string, io: CliIO): Promise<void> {
+  // ws:// → http://, wss:// → https:// (signaling DO's mint endpoint is HTTP)
+  const mintUrl = signalingUrl.replace(/^ws(s?):\/\//, 'http$1://');
+  let code: string;
+  try {
+    const resp = await fetch(mintUrl, { method: 'POST' });
+    if (!resp.ok) {
+      io.error(`mint failed: ${String(resp.status)} ${resp.statusText}`);
+      return;
+    }
+    const body = await resp.json() as { code?: unknown };
+    if (typeof body.code !== 'string') {
+      io.error('mint returned unexpected response (no code field)');
+      return;
+    }
+    code = body.code;
+  } catch (err) {
+    io.error(`signaling unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  const started = await runtime.start(code);
+  if (!started.ok) {
+    io.error(`session start failed: ${JSON.stringify(started.error)}`);
+    return;
+  }
+
+  io.write(`\nSession: ${viewerUrl}/?signaling=${signalingUrl}/${code}`);
+  io.write('Open the URL above in Chrome. Press Ctrl-C to stop.');
+}
+
+/**
+ * Parse, warn, compose, wire teardown, and fire the async session-start.
+ * Returns a synchronous exit code — the session-start runs in the background
+ * (void) and is verified end-to-end at S18.
  */
 export function run(argv: readonly string[], io: CliIO = defaultIO()): number {
   const parsed = parseCliArgs(argv);
@@ -138,11 +186,14 @@ export function run(argv: readonly string[], io: CliIO = defaultIO()): number {
   }
   const options = parsed.value;
   io.write(securityBanner(options));
-  const baseOptions = { localPort: options.port, signalingUrl: DEFAULT_SIGNALING_URL, allowedPaths: options.allowedPaths };
+  const signalingUrl = options.signalingUrl ?? DEFAULT_SIGNALING_URL;
+  const viewerUrl = options.viewerUrl ?? DEFAULT_VIEWER_URL;
+  const baseOptions = { localPort: options.port, signalingUrl, allowedPaths: options.allowedPaths };
   const hostOptions: HostOptions = options.ttlMs === undefined ? baseOptions : { ...baseOptions, ttlMs: options.ttlMs };
   const runtime = io.composeRuntime(hostOptions);
   io.onSigint(() => {
     void runtime.close('host interrupted (SIGINT)');
   });
+  void startSession(runtime, signalingUrl, viewerUrl, io);
   return 0;
 }
