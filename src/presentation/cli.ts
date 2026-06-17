@@ -138,25 +138,32 @@ function defaultIO(): CliIO {
 
 /**
  * Mint a session code, start the runtime, and print the viewer URL.
- * Runs asynchronously after run() returns — errors are written to io.error,
- * never thrown to the caller.
+ * Errors are written to io.error, never thrown to the caller.
  */
 async function startSession(runtime: HostRuntime, signalingUrl: string, viewerUrl: string, io: CliIO): Promise<void> {
   // ws:// → http://, wss:// → https:// (signaling DO's mint endpoint is HTTP)
   const mintUrl = signalingUrl.replace(/^ws(s?):\/\//, 'http$1://');
   let code: string;
   try {
-    const resp = await fetch(mintUrl, { method: 'POST' });
-    if (!resp.ok) {
-      io.error(`mint failed: ${String(resp.status)} ${resp.statusText}`);
-      return;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    try {
+      const resp = await fetch(mintUrl, { method: 'POST', signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        io.error(`mint failed: ${String(resp.status)} ${resp.statusText}`);
+        return;
+      }
+      const body = await resp.json() as { code?: unknown };
+      if (typeof body.code !== 'string') {
+        io.error('mint returned unexpected response (no code field)');
+        return;
+      }
+      code = body.code;
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      throw fetchErr;
     }
-    const body = await resp.json() as { code?: unknown };
-    if (typeof body.code !== 'string') {
-      io.error('mint returned unexpected response (no code field)');
-      return;
-    }
-    code = body.code;
   } catch (err) {
     io.error(`signaling unreachable: ${err instanceof Error ? err.message : String(err)}`);
     return;
@@ -173,11 +180,11 @@ async function startSession(runtime: HostRuntime, signalingUrl: string, viewerUr
 }
 
 /**
- * Parse, warn, compose, wire teardown, and fire the async session-start.
- * Returns a synchronous exit code — the session-start runs in the background
- * (void) and is verified end-to-end at S18.
+ * Parse, warn, compose, wire teardown, and start the session.
+ * Awaits startSession so the process stays alive after minting the code
+ * and printing the viewer URL.
  */
-export function run(argv: readonly string[], io: CliIO = defaultIO()): number {
+export async function run(argv: readonly string[], io: CliIO = defaultIO()): Promise<number> {
   const parsed = parseCliArgs(argv);
   if (!parsed.ok) {
     io.error(parsed.error.message);
@@ -194,6 +201,6 @@ export function run(argv: readonly string[], io: CliIO = defaultIO()): number {
   io.onSigint(() => {
     void runtime.close('host interrupted (SIGINT)');
   });
-  void startSession(runtime, signalingUrl, viewerUrl, io);
+  await startSession(runtime, signalingUrl, viewerUrl, io);
   return 0;
 }

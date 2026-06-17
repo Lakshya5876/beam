@@ -129,27 +129,28 @@ function fakeIO(): {
 }
 
 describe('run', () => {
-  it('prints usage to stderr and returns exit code 2 on bad args, never composing', () => {
+  it('prints usage to stderr and returns exit code 2 on bad args, never composing', async () => {
     const { io, errs, composedWith } = fakeIO();
-    const code = run([], io);
+    const code = await run([], io);
     expect(code).toBe(2);
     expect(errs).toContain(USAGE);
     expect(composedWith).toHaveLength(0);
   });
 
-  it('prints the banner, composes with parsed options, registers SIGINT, returns 0', () => {
+  it('prints the banner, composes with parsed options, registers SIGINT, returns 0', async () => {
     const { io, out, composedWith } = fakeIO();
-    const code = run(['3000', '--allowed-paths', '/api', '--ttl', '120'], io);
+    const code = await run(['3000', '--allowed-paths', '/api', '--ttl', '120'], io);
     expect(code).toBe(0);
     expect(out[0]).toContain('localhost:3000');
     expect(composedWith).toHaveLength(1);
     expect(composedWith[0]).toMatchObject({ localPort: 3000, allowedPaths: ['/api'], ttlMs: 120_000 });
   });
 
-  it('SIGINT triggers runtime.close', () => {
+  it('SIGINT triggers runtime.close', async () => {
     const { io, fireSigint, closedWith } = fakeIO();
-    run(['3000'], io);
+    const runPromise = run(['3000'], io);
     fireSigint();
+    await runPromise;
     expect(closedWith).toEqual(['host interrupted (SIGINT)']);
   });
 });
