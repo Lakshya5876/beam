@@ -47,8 +47,11 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     return;
   }
 
+  // Strip the session code from signalingBaseUrl (which may be a full URL including the code)
+  // to avoid duplicating the code when calling buildViewerSignalingUrl
+  const base = signalingBaseUrl.replace(new RegExp(`/${sessionCode}$`), '');
   const pc = new RTCPeerConnection();
-  const ws = new WebSocket(buildViewerSignalingUrl(signalingBaseUrl, sessionCode));
+  const ws = new WebSocket(buildViewerSignalingUrl(base, sessionCode));
 
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
