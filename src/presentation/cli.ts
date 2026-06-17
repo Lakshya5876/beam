@@ -204,3 +204,19 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO()): Pro
   await startSession(runtime, signalingUrl, viewerUrl, io);
   return 0;
 }
+
+// Entry point: only run when this module is the entry point (not when imported by tests).
+// Await run(), exit on error codes, keep process alive on success (code 0).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  run(process.argv.slice(2))
+    .then((code) => {
+      if (code !== 0) {
+        process.exit(code);
+      }
+      // code === 0: don't exit — the event loop must stay alive for WebRTC and signaling
+    })
+    .catch((err) => {
+      console.error('Fatal error:', err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    });
+}
