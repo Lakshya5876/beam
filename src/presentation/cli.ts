@@ -141,8 +141,9 @@ function defaultIO(): CliIO {
  * Errors are written to io.error, never thrown to the caller.
  */
 async function startSession(runtime: HostRuntime, signalingUrl: string, viewerUrl: string, io: CliIO): Promise<void> {
-  // ws:// → http://, wss:// → https:// (signaling DO's mint endpoint is HTTP)
-  const mintUrl = signalingUrl.replace(/^ws(s?):\/\//, 'http$1://');
+  // ws:// → http://, wss:// → https:// (signaling DO's mint endpoint is HTTP at /new)
+  const baseUrl = signalingUrl.replace(/^ws(s?):\/\//, 'http$1://');
+  const mintUrl = new URL('/new', baseUrl).href;
   let code: string;
   try {
     const controller = new AbortController();
