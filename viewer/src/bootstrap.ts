@@ -35,7 +35,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // Requires Service-Worker-Allowed: / header on /__beam/sw.js (S17 obligation).
   if (navigator.serviceWorker) {
     try {
-      await navigator.serviceWorker.register('/__beam/sw.js', { scope: '/' });
+      await navigator.serviceWorker.register('/__beam/sw.js', { scope: '/', type: 'module' });
     } catch {
       // SW registration failed; relay will not work but connection attempt continues
     }
