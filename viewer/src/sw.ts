@@ -17,7 +17,8 @@ import {
   trackStreamClose,
   RELAY_TIMEOUT_MS,
 } from './sw-fetch-gate.js';
-import { decodeFrame, isFrameDecodeError } from './protocol-bridge.js';
+import { encodeFrame, decodeFrame, isFrameDecodeError } from './protocol-bridge.js';
+import { encodeRequest } from './request-serializer.js';
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -117,7 +118,21 @@ async function handleFetch(streamId: number, request: Request): Promise<Response
     ? new Uint8Array(await request.arrayBuffer())
     : new Uint8Array(0);
 
-  source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: bodyBytes }));
+  // Build path (pathname + search) — host decodeRequestHead expects 'path', not full URL
+  const reqUrl = new URL(request.url);
+  const path = reqUrl.pathname + (reqUrl.search ?? '');
+
+  // Collect headers as [name, value] pairs (hop-by-hop stripped by LoopbackReplayClient)
+  const headers: Array<[string, string]> = [];
+  request.headers.forEach((value, name) => { headers.push([name, value]); });
+
+  // Encode into REQUEST_HEAD + REQUEST_BODY_CHUNK* + REQUEST_END frames.
+  // Each frame is sent as a separate relay-request so bootstrap can write them
+  // into the mux in order without reconstructing a compound buffer.
+  const frames = encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
+  for (const frame of frames) {
+    source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
+  }
 
   return new Promise<Response>((resolve) => {
     responseResolvers.set(streamId, resolve);

@@ -13,13 +13,13 @@ const STREAM_ID = 1;
 
 const GET_REQ: RequestLike = {
   method: 'GET',
-  url: 'http://localhost:3000/api/users',
+  path: '/api/users',
   headers: [['accept', 'application/json']],
 };
 
 const POST_REQ: RequestLike = {
   method: 'POST',
-  url: 'http://localhost:3000/api/data',
+  path: '/api/data',
   headers: [['content-type', 'application/json']],
   body: new TextEncoder().encode('{"hello":"world"}'),
 };
@@ -40,13 +40,13 @@ describe('encodeRequest', () => {
     expect(frames[2]?.type).toBe(FrameType.REQUEST_END);
   });
 
-  it('REQUEST_HEAD payload encodes method, url, headers as JSON', () => {
+  it('REQUEST_HEAD payload encodes method, path, headers as JSON', () => {
     const frames = encodeRequest(STREAM_ID, GET_REQ);
     const headFrame = frames[0];
     expect(headFrame).toBeDefined();
     if (!headFrame) return;
     const decoded = JSON.parse(new TextDecoder().decode(headFrame.payload)) as unknown;
-    expect(decoded).toEqual({ method: 'GET', url: GET_REQ.url, headers: GET_REQ.headers });
+    expect(decoded).toEqual({ method: 'GET', path: GET_REQ.path, headers: GET_REQ.headers });
   });
 
   it('body larger than MAX_PAYLOAD_SIZE chunks into multiple REQUEST_BODY_CHUNK frames', () => {

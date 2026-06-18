@@ -243,9 +243,20 @@ describe('SDP/ICE glue', () => {
     const peer = new FakeHostPeer();
     const signaling = new FakeSignalingClient();
     applyRemoteSignals(signaling, peer);
+    // Not valid JSON — must be dropped entirely.
     signaling.emit({ kind: 'ice-candidate', payload: 'not json' });
-    signaling.emit({ kind: 'ice-candidate', payload: JSON.stringify({ candidate: 'only-candidate' }) });
+    // Missing candidate field — must be dropped.
+    signaling.emit({ kind: 'ice-candidate', payload: JSON.stringify({ mid: '0' }) });
     expect(peer.addedCandidates).toEqual([]);
+  });
+
+  it('accepts a candidate whose sdpMid is null/absent (browser first m-line), defaulting mid to "0"', () => {
+    const peer = new FakeHostPeer();
+    const signaling = new FakeSignalingClient();
+    applyRemoteSignals(signaling, peer);
+    // Browser can emit event.candidate.sdpMid === null for the first m-line.
+    signaling.emit({ kind: 'ice-candidate', payload: JSON.stringify({ candidate: 'cand-no-mid' }) });
+    expect(peer.addedCandidates).toEqual([{ candidate: 'cand-no-mid', mid: '0' }]);
   });
 });
 

@@ -60,7 +60,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   const base = signalingBaseUrl.replace(new RegExp(`/${sessionCode}$`), '');
   const wsUrl = buildViewerSignalingUrl(base, sessionCode);
   console.log(`[VIEWER-BOOT] base=${base} wsUrl=${wsUrl}`);
-  const pc = new RTCPeerConnection();
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   console.log('[VIEWER-BOOT] RTCPeerConnection created');
   const ws = new WebSocket(wsUrl);
   ws.addEventListener('open', () => { console.log('[VIEWER-BOOT] WS OPEN'); });
@@ -98,6 +98,11 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
  * Wire the relay bridge: handle relay-request messages from the SW,
  * feed frames into the mux, and post relay-response back.
  * Called only after the mux exists (B1 guarantee).
+ *
+ * Each HTTP request now arrives as multiple relay-request messages (one per
+ * Beam frame: REQUEST_HEAD, REQUEST_BODY_CHUNK*, REQUEST_END).  The response
+ * listener must be registered exactly once per stream — on the first message —
+ * and frames for the same stream are written on every subsequent message.
  */
 function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, sessionCode: string): void {
   const sw = navigator.serviceWorker.controller;
@@ -106,34 +111,42 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
   // B1: now that mux exists, tell the SW it's ready (mux-ready, not claim-ready)
   sw.postMessage(serializeSwMessage({ type: 'mux-ready', sessionCode }));
 
+  // Track which streams already have a response listener to avoid duplicates.
+  const listeningStreams = new Set<number>();
+
   // Handle relay-request frames from the SW
   navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = event.data as { type?: string; streamId?: number; data?: Uint8Array } | null;
     if (!msg || msg.type !== 'relay-request' || typeof msg.streamId !== 'number') return;
 
     const streamId = msg.streamId;
-    conn.trackStream(streamId);
 
-    // Decode the frame bytes and write into the mux
+    // Register the response listener on the first frame for this stream only.
+    if (!listeningStreams.has(streamId)) {
+      listeningStreams.add(streamId);
+      conn.trackStream(streamId);
+
+      const unsubscribe = mux.onInbound((frame) => {
+        if (frame.streamId !== streamId) return;
+        const encoded = encodeFrame(frame);
+        sw.postMessage(
+          serializeSwMessage({ type: 'relay-response', streamId, data: encoded }),
+        );
+        if (frame.type === 6 /* RESPONSE_END */ || frame.type === 7 /* ERROR */) {
+          unsubscribe();
+          listeningStreams.delete(streamId);
+          conn.untrackStream(streamId);
+        }
+      });
+    }
+
+    // Decode the encoded Beam frame bytes and write into the mux.
     if (msg.data && msg.data.byteLength > 0) {
       const frame = decodeFrame(msg.data);
       if (!isFrameDecodeError(frame)) {
         mux.writeFrame(frame);
       }
     }
-
-    // Listen for response frames from the mux and relay back to SW
-    const unsubscribe = mux.onFrame((frame) => {
-      if (frame.streamId !== streamId) return;
-      const encoded = encodeFrame(frame);
-      sw.postMessage(
-        serializeSwMessage({ type: 'relay-response', streamId, data: encoded }),
-      );
-      if (frame.type === 6 /* RESPONSE_END */ || frame.type === 7 /* ERROR */) {
-        unsubscribe();
-        conn.untrackStream(streamId);
-      }
-    });
   });
 }
 

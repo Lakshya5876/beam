@@ -26,6 +26,12 @@ export class SessionDurableObject {
   // spam-blunting; the CSPRNG + used-token guard remain authoritative.
   private readonly mintLimiter = new RateLimiter({ maxPerWindow: 30, windowMs: 60_000 });
 
+  // Host messages (offer + ICE) arriving before the viewer connects are buffered
+  // here and flushed the moment the viewer's WebSocket is accepted. In-memory
+  // only — does not survive DO hibernation, which is acceptable because host and
+  // viewer connect within the same ICE window in practice.
+  private readonly pendingForViewer: Array<string | ArrayBuffer> = [];
+
   constructor(private readonly state: DurableObjectState) {}
 
   fetch(request: Request): Response | Promise<Response> {
@@ -65,6 +71,13 @@ export class SessionDurableObject {
     }
     // Role tag survives hibernation; the relay derives pairing from tags.
     this.state.acceptWebSocket(server, [assignment.role]);
+    // Flush any buffered host messages to the viewer immediately on connect.
+    if (assignment.role === 'viewer' && this.pendingForViewer.length > 0) {
+      for (const msg of this.pendingForViewer) {
+        server.send(msg);
+      }
+      this.pendingForViewer.length = 0;
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -79,7 +92,13 @@ export class SessionDurableObject {
       return;
     }
     const targetRole = relayTargetRole(senderRole);
-    for (const peer of this.state.getWebSockets(targetRole)) {
+    const targets = this.state.getWebSockets(targetRole);
+    if (targets.length === 0 && senderRole === 'host') {
+      // Viewer has not connected yet — buffer so the offer/ICE are not lost.
+      this.pendingForViewer.push(message);
+      return;
+    }
+    for (const peer of targets) {
       // OPAQUE relay: the message is forwarded verbatim. It is never parsed,
       // inspected, decoded, or stored — there is no payload code path.
       peer.send(message);

@@ -8,6 +8,7 @@ import type { PeerTransport, Unsubscribe } from '../../src/domain/interfaces.js'
 import { parseMessage, serializeMessage, type IceCandidate } from './signaling-messages.js';
 import { createViewerMultiplexer } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
+import { BrowserDataChannelAdapter } from './browser-datachannel.js';
 
 export interface BrowserPeer {
   applyRemoteDescription(sdp: string): Promise<void>;
@@ -72,31 +73,24 @@ export class ViewerConnection {
 
   private handleDataChannel(channel: RTCDataChannel): void {
     console.log('[VIEWER] ondatachannel fired');
-    // Lazy import to avoid pulling browser-datachannel into pure tests
-    // The cast is safe: ondatachannel is only called in a real browser context (S18)
-    import('./browser-datachannel.js').then(({ BrowserDataChannelAdapter }) => {
-      console.log('[VIEWER] BrowserDataChannelAdapter created — mux initializing');
-      const transport: PeerTransport = new BrowserDataChannelAdapter(channel);
-      const mux = createViewerMultiplexer(transport);
-      this.mux = mux;
+    const transport: PeerTransport = new BrowserDataChannelAdapter(channel);
+    const mux = createViewerMultiplexer(transport);
+    this.mux = mux;
 
-      // N3: on transport close, emit open stream IDs so bootstrap can send relay-errors
-      transport.onClose(() => {
-        console.log('[VIEWER] transport closed — firing close handlers');
-        const openIds = [...this.trackedStreamIds];
-        for (const handler of this.closeHandlers) {
-          handler(openIds);
-        }
-        this.trackedStreamIds.clear();
-      });
-
-      console.log('[VIEWER] mux ready — firing mux handlers');
-      for (const handler of this.muxHandlers) {
-        handler(mux);
+    // N3: on transport close, emit open stream IDs so bootstrap can send relay-errors
+    transport.onClose(() => {
+      console.log('[VIEWER] transport closed — firing close handlers');
+      const openIds = [...this.trackedStreamIds];
+      for (const handler of this.closeHandlers) {
+        handler(openIds);
       }
-    }).catch((e: unknown) => {
-      console.log('[VIEWER] handleDataChannel import failed:', e);
+      this.trackedStreamIds.clear();
     });
+
+    console.log('[VIEWER] mux ready — firing mux handlers');
+    for (const handler of this.muxHandlers) {
+      handler(mux);
+    }
   }
 
   private async handleSignalingMessage(text: string): Promise<void> {

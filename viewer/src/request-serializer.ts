@@ -10,7 +10,7 @@ import {
 
 export interface RequestLike {
   readonly method: string;
-  readonly url: string;
+  readonly path: string;
   readonly headers: ReadonlyArray<[string, string]>;
   readonly body?: Uint8Array;
 }
@@ -31,8 +31,8 @@ function makeFrame(type: number, streamIdNum: number, payloadBytes: Uint8Array):
 export function encodeRequest(streamIdNum: number, req: RequestLike): Frame[] {
   const frames: Frame[] = [];
 
-  // REQUEST_HEAD: JSON-encoded method, url, headers
-  const headJson = JSON.stringify({ method: req.method, url: req.url, headers: req.headers });
+  // REQUEST_HEAD: JSON-encoded method, path, headers — matches host decodeRequestHead
+  const headJson = JSON.stringify({ method: req.method, path: req.path, headers: req.headers });
   const headBytes = new TextEncoder().encode(headJson);
   frames.push(makeFrame(FrameType.REQUEST_HEAD, streamIdNum, headBytes));
 

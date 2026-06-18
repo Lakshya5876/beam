@@ -9,11 +9,7 @@ export class BrowserWebSocketAdapter implements SignalingSocket {
   constructor(private ws: WebSocket) {}
 
   async send(text: string): Promise<void> {
-    return new Promise((resolve) => {
-      this.ws.send(text);
-      // WebSocket.send is synchronous; await the promise for compatibility
-      setImmediate(resolve);
-    });
+    this.ws.send(text);
   }
 
   onmessage(handler: (text: string) => void): void {

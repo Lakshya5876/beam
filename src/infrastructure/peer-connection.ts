@@ -30,7 +30,7 @@ import {
 } from '../domain/interfaces.js';
 
 export const DEFAULT_STUN_SERVER = 'stun:stun.l.google.com:19302';
-export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+export const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 
 /** Infra-internal port: the subset of a native data channel we depend on. */
 export interface NativeDataChannel {

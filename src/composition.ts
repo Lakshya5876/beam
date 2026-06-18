@@ -84,8 +84,9 @@ function parseRemoteCandidate(payload: string): { candidate: string; mid: string
     if (typeof parsed === 'object' && parsed !== null) {
       const candidate = (parsed as { candidate?: unknown }).candidate;
       const mid = (parsed as { mid?: unknown }).mid;
-      if (typeof candidate === 'string' && typeof mid === 'string') {
-        return { candidate, mid };
+      if (typeof candidate === 'string') {
+        // Browser sdpMid can be null for the first m-line; treat null/missing as '0'.
+        return { candidate, mid: typeof mid === 'string' ? mid : '0' };
       }
     }
   } catch {

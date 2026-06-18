@@ -20,10 +20,13 @@ export interface SignalingMessage {
 const VALID_KINDS = new Set<SignalingMessageKind>(['offer', 'answer', 'ice-candidate']);
 
 /**
- * Serialize to JSON. Caller guarantees well-formed input.
+ * Serialize to JSON. IceCandidate objects are stringified so the wire payload
+ * is always a string, matching the host-side SignalingMessage.payload: string
+ * contract. Offer/answer payloads are already strings — no change there.
  */
 export function serializeMessage(kind: SignalingMessageKind, payload: SignalingPayload): string {
-  return JSON.stringify({ kind, payload });
+  const wirePayload = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  return JSON.stringify({ kind, payload: wirePayload });
 }
 
 /**
@@ -54,18 +57,21 @@ export function parseMessage(text: string): SignalingMessage | null {
 }
 
 function parseIceCandidate(payload: unknown): SignalingMessage | null {
-  if (typeof payload !== 'object' || payload === null) {
+  // Host sends payload as a JSON string (host SignalingMessage.payload: string).
+  // Parse it first if it arrived as a string; keep object form for robustness.
+  let ic: unknown = payload;
+  if (typeof payload === 'string') {
+    try { ic = JSON.parse(payload); } catch { return null; }
+  }
+  if (typeof ic !== 'object' || ic === null) {
     return null;
   }
-  const ic = payload as { candidate?: unknown; mid?: unknown };
-  if (typeof ic.candidate !== 'string') {
+  const { candidate, mid } = ic as { candidate?: unknown; mid?: unknown };
+  if (typeof candidate !== 'string') {
     return null;
   }
   return {
     kind: 'ice-candidate',
-    payload: {
-      candidate: ic.candidate,
-      mid: typeof ic.mid === 'string' ? ic.mid : undefined,
-    },
+    payload: typeof mid === 'string' ? { candidate, mid } : { candidate },
   };
 }
