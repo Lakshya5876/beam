@@ -23,7 +23,7 @@ export type FrameType = (typeof FrameType)[keyof typeof FrameType];
 const FRAME_TYPE_VALUES: ReadonlySet<number> = new Set(Object.values(FrameType));
 
 export const HEADER_SIZE = 9;
-export const MAX_PAYLOAD_SIZE = 256 * 1024;
+export const MAX_PAYLOAD_SIZE = 16375; // 16384 (RTCDataChannel SCTP ceiling) − HEADER_SIZE (9)
 export const MAX_FRAME_SIZE = HEADER_SIZE + MAX_PAYLOAD_SIZE;
 
 const MAX_STREAM_ID = 0xffff_ffff;
