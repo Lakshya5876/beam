@@ -3,16 +3,16 @@
  * arg parsing + output formatting only; it composes via the composition root
  * and drives application use-cases — never infrastructure/domain concretes.
  *
- * run() stays synchronous and returns an exit code — existing tests cover the
- * sync surface (parse errors, banner, SIGINT). The async session-start work
- * (mint → start → print URL) is fired with `void` and verified live at S18.
+ * run() prompts for the local URL interactively, generates a 6-digit CSPRNG
+ * PIN, mints a session, and prints the viewer URL + PIN side-by-side.
+ * The async session-start work (mint → start → print) is verified live at S18.
  */
 
 import { parseArgs } from 'node:util';
+import { randomInt } from 'node:crypto';
+import { createInterface } from 'node:readline';
 import { composeHost, type HostOptions, type HostRuntime } from '../composition.js';
 
-// Presentation-local result type: the layer imports Application/composition
-// ONLY (CLAUDE.md §1), so it does not reach into the domain Result.
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: CliUsageError };
 
 function pOk<T>(value: T): Parsed<T> {
@@ -29,10 +29,9 @@ export const DEFAULT_SIGNALING_URL = 'wss://signal.beam.workers.dev';
 export const DEFAULT_VIEWER_URL = 'https://beam-viewer.pages.dev';
 
 export const USAGE =
-  'usage: beam <port> [--allowed-paths /a,/b] [--ttl <seconds>] [--signaling <url>] [--viewer <url>]';
+  'usage: bm [--allowed-paths /a,/b] [--ttl <seconds>] [--signaling <url>] [--viewer <url>]';
 
 export interface CliOptions {
-  readonly port: number;
   readonly allowedPaths: string[];
   readonly ttlMs?: number;
   readonly signalingUrl?: string;
@@ -46,17 +45,6 @@ export interface CliUsageError {
 
 function usage(message: string): CliUsageError {
   return { error: 'CliUsage', message };
-}
-
-function parsePort(raw: string | undefined): Parsed<number> {
-  if (raw === undefined) {
-    return pErr(usage('missing required <port> argument'));
-  }
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    return pErr(usage(`invalid port "${raw}" — expected an integer 1..65535`));
-  }
-  return pOk(port);
 }
 
 function parseTtl(raw: string | undefined): Parsed<number | undefined> {
@@ -81,14 +69,10 @@ export function parseCliArgs(argv: readonly string[]): CliParseResult {
         signaling: { type: 'string' },
         viewer: { type: 'string' },
       },
-      allowPositionals: true,
+      allowPositionals: false,
     });
   } catch {
     return pErr(usage('unrecognized arguments'));
-  }
-  const port = parsePort(parsed.positionals[0]);
-  if (!port.ok) {
-    return port;
   }
   const ttl = parseTtl(parsed.values.ttl);
   if (!ttl.ok) {
@@ -97,7 +81,6 @@ export function parseCliArgs(argv: readonly string[]): CliParseResult {
   const allowedRaw = parsed.values['allowed-paths'];
   const allowedPaths = allowedRaw ? allowedRaw.split(',').map((p) => p.trim()).filter((p) => p.length > 0) : [];
   const base: CliOptions = {
-    port: port.value,
     allowedPaths,
     ...(ttl.value !== undefined && { ttlMs: ttl.value }),
     ...(parsed.values.signaling !== undefined && { signalingUrl: parsed.values.signaling }),
@@ -106,16 +89,32 @@ export function parseCliArgs(argv: readonly string[]): CliParseResult {
   return pOk(base);
 }
 
-export function securityBanner(options: CliOptions): string {
+/** Parse a user-typed local URL string → port number. Accepts bare host:port too. */
+export function parseLocalUrl(raw: string): Parsed<number> {
+  let url: URL;
+  try {
+    url = new URL(raw.includes('://') ? raw : `http://${raw}`);
+  } catch {
+    return pErr(usage(`invalid URL "${raw}" — expected e.g. http://localhost:3000`));
+  }
+  const portStr = url.port;
+  const port = portStr ? Number(portStr) : (url.protocol === 'https:' ? 443 : 80);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    return pErr(usage(`no valid port in "${raw}"`));
+  }
+  return pOk(port);
+}
+
+export function securityBanner(localUrl: string, allowedPaths: string[]): string {
   const scope =
-    options.allowedPaths.length > 0
-      ? `Only these paths are exposed: ${options.allowedPaths.join(', ')}`
-      : `Every route on port ${String(options.port)} is reachable by anyone with the link.`;
+    allowedPaths.length > 0
+      ? `Only these paths are exposed: ${allowedPaths.join(', ')}`
+      : `Every route on ${localUrl} is reachable by anyone with the link.`;
   return [
-    '⚠  Beam is about to expose your local server.',
-    `   Port: localhost:${String(options.port)}`,
+    'WARNING: Beam is about to expose your local server.',
+    `   Target: ${localUrl}`,
     `   ${scope}`,
-    '   Anyone holding the session link can send requests for the life of the session.',
+    '   Anyone holding the session link + code can send requests for the life of the session.',
     '   Press Ctrl-C to stop.',
   ].join('\n');
 }
@@ -125,6 +124,8 @@ export interface CliIO {
   error(line: string): void;
   onSigint(handler: () => void): void;
   composeRuntime(options: HostOptions): HostRuntime;
+  promptLocalUrl(): Promise<string>;
+  generatePin(): string;
 }
 
 function defaultIO(): CliIO {
@@ -133,15 +134,30 @@ function defaultIO(): CliIO {
     error: (line) => process.stderr.write(`${line}\n`),
     onSigint: (handler) => process.on('SIGINT', handler),
     composeRuntime: (options) => composeHost(options),
+    promptLocalUrl(): Promise<string> {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      return new Promise<string>((resolve) => {
+        rl.question('  Enter local URL (e.g. http://localhost:3000): ', (answer) => {
+          rl.close();
+          resolve(answer.trim());
+        });
+      });
+    },
+    generatePin: () => String(randomInt(100_000, 1_000_000)),
   };
 }
 
 /**
- * Mint a session code, start the runtime, and print the viewer URL.
+ * Mint a session code, start the runtime, and print the viewer URL + PIN.
  * Errors are written to io.error, never thrown to the caller.
  */
-async function startSession(runtime: HostRuntime, signalingUrl: string, viewerUrl: string, io: CliIO): Promise<void> {
-  // ws:// → http://, wss:// → https:// (signaling DO's mint endpoint is HTTP at /new)
+async function startSession(
+  runtime: HostRuntime,
+  signalingUrl: string,
+  viewerUrl: string,
+  pin: string,
+  io: CliIO,
+): Promise<void> {
   const baseUrl = signalingUrl.replace(/^ws(s?):\/\//, 'http$1://');
   const mintUrl = new URL('/new', baseUrl).href;
   let code: string;
@@ -176,14 +192,18 @@ async function startSession(runtime: HostRuntime, signalingUrl: string, viewerUr
     return;
   }
 
-  io.write(`\nSession: ${viewerUrl}/?signaling=${signalingUrl}/${code}`);
-  io.write('Open the URL above in Chrome. Press Ctrl-C to stop.');
+  const sessionUrl = `${viewerUrl}/?signaling=${signalingUrl}/${code}`;
+  const formattedPin = `${pin.slice(0, 3)} ${pin.slice(3)}`;
+  io.write('');
+  io.write(`  Viewer URL:   ${sessionUrl}`);
+  io.write(`  Session code: ${formattedPin}`);
+  io.write('');
+  io.write('  Share both with your viewer. Press Ctrl-C to end the session.');
+  io.write('');
 }
 
 /**
- * Parse, warn, compose, wire teardown, and start the session.
- * Awaits startSession so the process stays alive after minting the code
- * and printing the viewer URL.
+ * Parse flags, prompt for local URL, generate PIN, compose runtime, start session.
  */
 export async function run(argv: readonly string[], io: CliIO = defaultIO()): Promise<number> {
   const parsed = parseCliArgs(argv);
@@ -193,28 +213,38 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO()): Pro
     return 2;
   }
   const options = parsed.value;
-  io.write(securityBanner(options));
+
+  const rawUrl = await io.promptLocalUrl();
+  const portResult = parseLocalUrl(rawUrl);
+  if (!portResult.ok) {
+    io.error(portResult.error.message);
+    io.error(USAGE);
+    return 2;
+  }
+  const port = portResult.value;
+
+  io.write(securityBanner(rawUrl, options.allowedPaths));
+
+  const pin = io.generatePin();
   const signalingUrl = options.signalingUrl ?? DEFAULT_SIGNALING_URL;
   const viewerUrl = options.viewerUrl ?? DEFAULT_VIEWER_URL;
-  const baseOptions = { localPort: options.port, signalingUrl, allowedPaths: options.allowedPaths };
+  const baseOptions = { localPort: port, signalingUrl, allowedPaths: options.allowedPaths };
   const hostOptions: HostOptions = options.ttlMs === undefined ? baseOptions : { ...baseOptions, ttlMs: options.ttlMs };
   const runtime = io.composeRuntime(hostOptions);
   io.onSigint(() => {
     void runtime.close('host interrupted (SIGINT)');
   });
-  await startSession(runtime, signalingUrl, viewerUrl, io);
+  await startSession(runtime, signalingUrl, viewerUrl, pin, io);
   return 0;
 }
 
-// Entry point: only run when this module is the entry point (not when imported by tests).
-// Await run(), exit on error codes, keep process alive on success (code 0).
+// Entry point: only run when this module is the entry point.
 if (import.meta.url === `file://${process.argv[1]}`) {
   run(process.argv.slice(2))
     .then((code) => {
       if (code !== 0) {
         process.exit(code);
       }
-      // code === 0: don't exit — the event loop must stay alive for WebRTC and signaling
     })
     .catch((err) => {
       console.error('Fatal error:', err instanceof Error ? err.message : String(err));
