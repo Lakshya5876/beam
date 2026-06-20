@@ -38,6 +38,10 @@ class FakeSignalingClient implements SignalingClient {
     this.disconnectCalls += 1;
     return Promise.resolve();
   }
+  registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>> {
+    void hash;
+    return Promise.resolve(ok());
+  }
 }
 
 function fixedClock(value = 1_000_000): () => number {

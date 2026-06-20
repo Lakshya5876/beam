@@ -19,6 +19,7 @@ import {
   type Result,
   type SignalingClient,
   type SignalingMessage,
+  type SignalingNotConnectedError,
   type Unsubscribe,
 } from './domain/interfaces.js';
 import { InMemoryRequestLogStore } from './infrastructure/request-log-store.js';
@@ -246,6 +247,7 @@ export interface HostOptions {
 export interface HostRuntime {
   start(rawCode: string): Promise<Result<undefined, StartSessionError>>;
   close(reason: string): Promise<void>;
+  registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>>;
   readonly session: ExecuteSessionUseCase;
   readonly diagnostics: QueryDiagnosticsUseCase;
 }
@@ -280,6 +282,9 @@ export function composeHost(options: HostOptions, factories: HostFactories = rea
     async close(reason) {
       peer.close();
       await session.closeSession(reason);
+    },
+    registerPin(hash) {
+      return signaling.registerPin(hash);
     },
   };
 }

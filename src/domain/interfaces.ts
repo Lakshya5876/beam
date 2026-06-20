@@ -75,6 +75,7 @@ export interface SignalingClient {
   sendMessage(message: SignalingMessage): Promise<Result<undefined, SignalingNotConnectedError>>;
   onMessage(handler: (message: SignalingMessage) => void): Unsubscribe;
   disconnect(): Promise<void>;
+  registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>>;
 }
 
 export interface ReplayRequest {

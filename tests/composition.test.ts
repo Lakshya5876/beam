@@ -71,6 +71,7 @@ describe('composition root (config)', () => {
 
 class FakeSignalingClient implements SignalingClient {
   public sent: SignalingMessage[] = [];
+  public registeredPinHashes: string[] = [];
   private handler: ((m: SignalingMessage) => void) | null = null;
   connect(): Promise<Result<undefined, SignalingConnectError>> {
     return Promise.resolve(ok());
@@ -87,6 +88,10 @@ class FakeSignalingClient implements SignalingClient {
   }
   disconnect(): Promise<void> {
     return Promise.resolve();
+  }
+  registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>> {
+    this.registeredPinHashes.push(hash);
+    return Promise.resolve(ok());
   }
   emit(message: SignalingMessage): void {
     this.handler?.(message);
@@ -399,5 +404,20 @@ describe('composeHost — wiring with injected fakes', () => {
     expect(peer.started).toBe(true);
     await runtime.close('done');
     expect(runtime.session.state()).toBe('closed');
+  });
+
+  it('registerPin() delegates to signaling.registerPin()', async () => {
+    const signaling = new FakeSignalingClient();
+    const factories: HostFactories = {
+      createLogStore: () => new FakeRequestLogRepository(),
+      createReplayClient: () => makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client,
+      createSignalingClient: () => signaling,
+      createPeer: () => new FakeHostPeer(),
+    };
+    const runtime = composeHost({ localPort: 3000, signalingUrl: 'ws://127.0.0.1:9', now: () => 1 }, factories);
+    const fakeHash = 'b'.repeat(64);
+    const result = await runtime.registerPin(fakeHash);
+    expect(result.ok).toBe(true);
+    expect(signaling.registeredPinHashes).toContain(fakeHash);
   });
 });

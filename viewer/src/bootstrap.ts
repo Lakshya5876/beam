@@ -6,6 +6,11 @@
  * S17 obligation: sw.js must be served with the response header
  *   Service-Worker-Allowed: /
  * Without it, the scope:'/' registration below throws SecurityError at runtime.
+ *
+ * M3 PIN gate: after WebSocket connects, the viewer renders a PIN entry form.
+ * The viewer submits the 6-digit code; the DO validates SHA-256(pin+":"+sessionCode)
+ * against the stored hash. On pin-ok the DO flushes buffered SDP/ICE and WebRTC
+ * negotiation begins. On pin-locked the session ends.
  */
 
 import { readBrowserCapabilities } from './browser-capabilities.js';
@@ -14,7 +19,7 @@ import { buildViewerSignalingUrl } from './viewer-url.js';
 import { BrowserPeerAdapter } from './browser-peer.js';
 import { BrowserWebSocketAdapter } from './browser-signaling.js';
 import { ViewerConnection } from './viewer-connection.js';
-import { renderConnecting, renderFailed, renderUnsupported } from './pages.js';
+import { renderConnecting, renderFailed, renderPinEntry, renderPinFailed, renderPinLocked, renderUnsupported } from './pages.js';
 import { serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
@@ -31,8 +36,6 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     return;
   }
 
-  root.textContent = renderConnecting();
-
   // N4: register with scope:'/' so the SW intercepts all same-origin fetches.
   // Requires Service-Worker-Allowed: / header on /__beam/sw.js (S17 obligation).
   if (navigator.serviceWorker) {
@@ -42,7 +45,6 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
       console.log('[VIEWER-BOOT] SW registered');
     } catch (e) {
       console.log('[VIEWER-BOOT] SW registration FAILED:', e);
-      // SW registration failed; relay will not work but connection attempt continues
     }
   } else {
     console.log('[VIEWER-BOOT] navigator.serviceWorker unavailable');
@@ -55,17 +57,24 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     return;
   }
 
-  // Strip the session code from signalingBaseUrl (which may be a full URL including the code)
-  // to avoid duplicating the code when calling buildViewerSignalingUrl
   const base = signalingBaseUrl.replace(new RegExp(`/${sessionCode}$`), '');
   const wsUrl = buildViewerSignalingUrl(base, sessionCode);
   console.log(`[VIEWER-BOOT] base=${base} wsUrl=${wsUrl}`);
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-  console.log('[VIEWER-BOOT] RTCPeerConnection created');
   const ws = new WebSocket(wsUrl);
   ws.addEventListener('open', () => { console.log('[VIEWER-BOOT] WS OPEN'); });
   ws.addEventListener('close', (e) => { console.log(`[VIEWER-BOOT] WS CLOSE code=${String(e.code)} reason=${e.reason}`); });
   ws.addEventListener('error', () => { console.log('[VIEWER-BOOT] WS ERROR'); });
+
+  // M3 PIN gate: show PIN form, wait for DO to confirm or lock.
+  const pinOk = await requestPinVerification(ws, root);
+  if (!pinOk) {
+    return; // renderPinLocked already shown inside requestPinVerification
+  }
+
+  root.textContent = renderConnecting();
+
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  console.log('[VIEWER-BOOT] RTCPeerConnection created');
 
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
@@ -91,6 +100,61 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     for (const streamId of openStreamIds) {
       sw.postMessage(serializeSwMessage({ type: 'relay-error', streamId, reason: 'disconnect' }));
     }
+  });
+}
+
+/**
+ * Show the PIN entry form in root, let the user submit, and negotiate with the DO.
+ * Returns true on pin-ok (WebRTC can start), false on pin-locked or WS close.
+ */
+async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    root.innerHTML = renderPinEntry();
+
+    function wireForm(): void {
+      const form = root.querySelector<HTMLFormElement>('#beam-pin-form');
+      const input = root.querySelector<HTMLInputElement>('#beam-pin');
+      if (!form || !input) return;
+
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const raw = input.value.replace(/\s/g, '');
+        console.log(`[VIEWER-BOOT] submitting PIN (${String(raw.length)} chars)`);
+        ws.send(JSON.stringify({ type: 'pin', value: raw }));
+      }, { once: true });
+    }
+
+    wireForm();
+
+    function onMessage(event: MessageEvent): void {
+      const control = parsePinControl(event.data as unknown);
+      if (!control) return;
+
+      if (control.type === 'pin-ok') {
+        ws.removeEventListener('message', onMessage);
+        resolve(true);
+      } else if (control.type === 'pin-failed') {
+        const left = control.attemptsLeft ?? 0;
+        console.log(`[VIEWER-BOOT] pin-failed attemptsLeft=${String(left)}`);
+        root.innerHTML = renderPinFailed(left);
+        wireForm();
+      } else if (control.type === 'pin-locked') {
+        ws.removeEventListener('message', onMessage);
+        root.innerHTML = renderPinLocked();
+        resolve(false);
+      }
+    }
+
+    ws.addEventListener('message', onMessage);
+
+    // WS closed before pin-ok (host disconnected or lockout via ws.close)
+    ws.addEventListener('close', () => {
+      ws.removeEventListener('message', onMessage);
+      if (root.querySelector('#beam-pin-form')) {
+        root.innerHTML = renderPinLocked();
+      }
+      resolve(false);
+    }, { once: true });
   });
 }
 
@@ -167,5 +231,29 @@ function extractSessionCode(): string | null {
     if (last && /^[a-z0-9]{4,}$/.test(last)) return last;
   }
 
+  return null;
+}
+
+interface PinControl {
+  type: 'pin-ok' | 'pin-failed' | 'pin-locked';
+  attemptsLeft?: number;
+}
+
+function parsePinControl(raw: unknown): PinControl | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const obj = parsed as Record<string, unknown>;
+    const type = obj['type'];
+    if (type === 'pin-ok') return { type: 'pin-ok' };
+    if (type === 'pin-failed') {
+      const left = typeof obj['attemptsLeft'] === 'number' ? obj['attemptsLeft'] : 0;
+      return { type: 'pin-failed', attemptsLeft: left };
+    }
+    if (type === 'pin-locked') return { type: 'pin-locked' };
+  } catch {
+    // not JSON
+  }
   return null;
 }

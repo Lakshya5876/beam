@@ -232,4 +232,31 @@ describe('WebSocketSignalingClient — connection state and failures', () => {
     // No server push configured; after unsubscribe nothing is delivered regardless.
     expect(received).toEqual([]);
   });
+
+  it('registerPin before connect returns SignalingNotConnected', async () => {
+    const client = makeClient('ws://127.0.0.1:9');
+    const result = await client.registerPin('a'.repeat(64));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toEqual({ error: 'SignalingNotConnected' });
+    }
+  });
+
+  it('registerPin when connected sends {type:"pin-register",hash} over the wire', async () => {
+    const received: string[] = [];
+    const port = startServer({ onMessage: (_client, msg) => { received.push(msg); } });
+    const client = makeClient(`ws://127.0.0.1:${String(port)}`);
+    await client.connect(mustCode());
+    const fakeHash = 'a'.repeat(64);
+    const result = await client.registerPin(fakeHash);
+    expect(result.ok).toBe(true);
+    // Give the server a tick to capture the message
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(received.some((m) => {
+      try {
+        const parsed = JSON.parse(m) as { type?: unknown; hash?: unknown };
+        return parsed.type === 'pin-register' && parsed.hash === fakeHash;
+      } catch { return false; }
+    })).toBe(true);
+  });
 });

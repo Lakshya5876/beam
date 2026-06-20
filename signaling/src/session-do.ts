@@ -9,6 +9,11 @@
  * socket TAG (survives eviction) and read back via state.getTags — never an
  * in-memory map. The pure role/relay logic is in pairing.ts.
  *
+ * PIN pairing (M3): host sends {"type":"pin-register","hash":"<sha256>"} after
+ * connecting; DO stores the hash. Viewer sends {"type":"pin","value":"<6digits>"};
+ * DO verifies SHA-256(value + ":" + sessionCode) against stored hash. On match,
+ * pendingForViewer is flushed and WebRTC signaling begins. Three-strike lockout.
+ *
  * Runtime-bound; the live pairing/relay/hibernation path is verified at S18.
  */
 
@@ -17,20 +22,19 @@ import { isWithinSizeCap } from './message-size.js';
 import { mintUnusedCode } from './session-code.js';
 import { StorageUsedTokenStore } from './used-token-store.js';
 import { RateLimiter } from './rate-limit.js';
+import { hashPin, PIN_HASH_KEY, PIN_ATTEMPTS_KEY, PIN_MAX_ATTEMPTS } from './pin-store.js';
 
 const USED_PREFIX = 'used:';
 
 export class SessionDurableObject {
-  // Per-IP mint rate limit; in-memory on the registry instance (blunts spam
-  // per design §A.2.4). Resets if the registry hibernates — acceptable for
-  // spam-blunting; the CSPRNG + used-token guard remain authoritative.
   private readonly mintLimiter = new RateLimiter({ maxPerWindow: 30, windowMs: 60_000 });
 
-  // Host messages (offer + ICE) arriving before the viewer connects are buffered
-  // here and flushed the moment the viewer's WebSocket is accepted. In-memory
-  // only — does not survive DO hibernation, which is acceptable because host and
-  // viewer connect within the same ICE window in practice.
+  // Host messages (offer + ICE) buffered until viewer completes PIN verification.
   private readonly pendingForViewer: Array<string | ArrayBuffer> = [];
+
+  // True once the viewer has submitted a correct PIN. In-memory only; resets on
+  // DO hibernation (acceptable — the PIN exchange is fast, within one ICE window).
+  private viewerPinVerified = false;
 
   constructor(private readonly state: DurableObjectState) {}
 
@@ -69,14 +73,12 @@ export class SessionDurableObject {
       server.close(1013, assignment.reason);
       return new Response(null, { status: 101, webSocket: client });
     }
-    // Role tag survives hibernation; the relay derives pairing from tags.
     this.state.acceptWebSocket(server, [assignment.role]);
-    // Flush any buffered host messages to the viewer immediately on connect.
-    if (assignment.role === 'viewer' && this.pendingForViewer.length > 0) {
-      for (const msg of this.pendingForViewer) {
-        server.send(msg);
-      }
-      this.pendingForViewer.length = 0;
+    // Flush buffered host messages only after PIN is verified — not here.
+    // (viewerPinVerified will be true if the viewer reconnects post-verification
+    // within the same DO lifetime, which is the same in-memory flag check.)
+    if (assignment.role === 'viewer' && this.viewerPinVerified && this.pendingForViewer.length > 0) {
+      this.flushPendingToViewer();
     }
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -91,18 +93,100 @@ export class SessionDurableObject {
     if (senderRole === null) {
       return;
     }
-    const targetRole = relayTargetRole(senderRole);
-    const targets = this.state.getWebSockets(targetRole);
-    if (targets.length === 0 && senderRole === 'host') {
-      // Viewer has not connected yet — buffer so the offer/ICE are not lost.
-      this.pendingForViewer.push(message);
+
+    // Intercept control messages (use `type` field, distinct from SDP/ICE `kind`).
+    if (typeof message === 'string') {
+      const control = tryParseControl(message);
+      if (control !== null) {
+        void this.handleControl(ws, senderRole, control);
+        return;
+      }
+    }
+
+    // Opaque relay: viewer must be PIN-verified before host messages are forwarded.
+    this.relayMessage(senderRole, message);
+  }
+
+  private relayMessage(senderRole: PeerRole, message: string | ArrayBuffer): void {
+    const targets = this.state.getWebSockets(relayTargetRole(senderRole));
+    if (targets.length === 0 || (senderRole === 'host' && !this.viewerPinVerified)) {
+      if (senderRole === 'host') {
+        this.pendingForViewer.push(message);
+      }
       return;
     }
     for (const peer of targets) {
-      // OPAQUE relay: the message is forwarded verbatim. It is never parsed,
-      // inspected, decoded, or stored — there is no payload code path.
       peer.send(message);
     }
+  }
+
+  private async handleControl(
+    ws: WebSocket,
+    senderRole: PeerRole,
+    control: Record<string, unknown>,
+  ): Promise<void> {
+    const type = control['type'];
+    if (type === 'pin-register' && senderRole === 'host') {
+      const hash = control['hash'];
+      if (typeof hash === 'string' && hash.length === 64) {
+        await this.handlePinRegister(hash);
+      }
+    } else if (type === 'pin' && senderRole === 'viewer') {
+      const value = control['value'];
+      if (typeof value === 'string') {
+        await this.handlePinVerify(ws, value);
+      }
+    }
+  }
+
+  private async handlePinRegister(hash: string): Promise<void> {
+    await this.state.storage.put(PIN_HASH_KEY, hash);
+    await this.state.storage.put(PIN_ATTEMPTS_KEY, PIN_MAX_ATTEMPTS);
+  }
+
+  private async handlePinVerify(ws: WebSocket, rawPin: string): Promise<void> {
+    const storedHash = await this.state.storage.get<string>(PIN_HASH_KEY);
+    if (!storedHash) {
+      // Host never registered a PIN — treat as lockout (no PIN = no entry).
+      ws.close(1008, 'pin-locked');
+      return;
+    }
+
+    const attempts = (await this.state.storage.get<number>(PIN_ATTEMPTS_KEY)) ?? 0;
+    if (attempts <= 0) {
+      ws.close(1008, 'pin-locked');
+      return;
+    }
+
+    const sessionCode = this.state.id.name ?? '';
+    const computed = await hashPin(rawPin, sessionCode);
+
+    if (computed !== storedHash) {
+      const remaining = attempts - 1;
+      await this.state.storage.put(PIN_ATTEMPTS_KEY, remaining);
+      if (remaining <= 0) {
+        ws.send(JSON.stringify({ type: 'pin-locked' }));
+        ws.close(1008, 'pin-locked');
+      } else {
+        ws.send(JSON.stringify({ type: 'pin-failed', attemptsLeft: remaining }));
+      }
+      return;
+    }
+
+    // PIN correct — promote viewer and flush buffered host messages.
+    this.viewerPinVerified = true;
+    ws.send(JSON.stringify({ type: 'pin-ok' }));
+    this.flushPendingToViewer();
+  }
+
+  private flushPendingToViewer(): void {
+    const viewers = this.state.getWebSockets('viewer');
+    for (const viewer of viewers) {
+      for (const msg of this.pendingForViewer) {
+        viewer.send(msg);
+      }
+    }
+    this.pendingForViewer.length = 0;
   }
 
   private currentRoles(): PeerRole[] {
@@ -135,4 +219,17 @@ export class SessionDurableObject {
     }
     return codes;
   }
+}
+
+/** Try to parse a JSON string as a control message (has `type` field, not `kind`). */
+function tryParseControl(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && 'type' in parsed && !('kind' in parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // not JSON
+  }
+  return null;
 }

@@ -117,6 +117,11 @@ class FakeSignalingClient implements SignalingClient {
     this.connected = false;
     return Promise.resolve();
   }
+
+  registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>> {
+    void hash;
+    return Promise.resolve(ok());
+  }
 }
 
 const fakeReplayClient: ReplayClient = {

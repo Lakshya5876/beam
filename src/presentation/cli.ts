@@ -9,7 +9,7 @@
  */
 
 import { parseArgs } from 'node:util';
-import { randomInt } from 'node:crypto';
+import { randomInt, createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { composeHost, type HostOptions, type HostRuntime } from '../composition.js';
 
@@ -147,6 +147,10 @@ function defaultIO(): CliIO {
   };
 }
 
+function computePinHash(pin: string, sessionCode: string): string {
+  return createHash('sha256').update(`${pin}:${sessionCode}`).digest('hex');
+}
+
 /**
  * Mint a session code, start the runtime, and print the viewer URL + PIN.
  * Errors are written to io.error, never thrown to the caller.
@@ -189,6 +193,14 @@ async function startSession(
   const started = await runtime.start(code);
   if (!started.ok) {
     io.error(`session start failed: ${JSON.stringify(started.error)}`);
+    return;
+  }
+
+  // Register the PIN hash with the DO so the viewer must verify before WebRTC starts.
+  const pinHash = computePinHash(pin, code);
+  const pinResult = await runtime.registerPin(pinHash);
+  if (!pinResult.ok) {
+    io.error('pin registration failed: signaling disconnected');
     return;
   }
 

@@ -174,6 +174,19 @@ export class WebSocketSignalingClient implements SignalingClient {
     return Promise.resolve(ok());
   }
 
+  registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>> {
+    if (this.state !== 'open' || !this.socket) {
+      return Promise.resolve(err({ error: 'SignalingNotConnected' }));
+    }
+    try {
+      this.socket.sendMessage(JSON.stringify({ type: 'pin-register', hash }));
+    } catch {
+      this.state = 'closed';
+      return Promise.resolve(err({ error: 'SignalingNotConnected' }));
+    }
+    return Promise.resolve(ok());
+  }
+
   onMessage(handler: (message: SignalingMessage) => void): Unsubscribe {
     this.handlers.push(handler);
     return () => {

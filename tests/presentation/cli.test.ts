@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok, type Result } from '../../src/domain/interfaces.js';
+import { ok, type Result, type SignalingNotConnectedError } from '../../src/domain/interfaces.js';
 import type { HostOptions, HostRuntime } from '../../src/composition.js';
 import type { StartSessionError } from '../../src/application/session-use-case.js';
 import { ExecuteSessionUseCase } from '../../src/application/session-use-case.js';
@@ -94,8 +94,9 @@ describe('securityBanner', () => {
   });
 });
 
-function fakeRuntime(): { runtime: HostRuntime; closedWith: string[] } {
+function fakeRuntime(): { runtime: HostRuntime; closedWith: string[]; pinHashes: string[] } {
   const closedWith: string[] = [];
+  const pinHashes: string[] = [];
   const runtime: HostRuntime = {
     start(): Promise<Result<undefined, StartSessionError>> {
       return Promise.resolve(ok());
@@ -104,8 +105,12 @@ function fakeRuntime(): { runtime: HostRuntime; closedWith: string[] } {
       closedWith.push(reason);
       return Promise.resolve();
     },
+    registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>> {
+      pinHashes.push(hash);
+      return Promise.resolve(ok());
+    },
     session: new ExecuteSessionUseCase(
-      { connect: () => Promise.resolve(ok()), sendMessage: () => Promise.resolve(ok()), onMessage: () => () => undefined, disconnect: () => Promise.resolve() },
+      { connect: () => Promise.resolve(ok()), sendMessage: () => Promise.resolve(ok()), onMessage: () => () => undefined, disconnect: () => Promise.resolve(), registerPin: () => Promise.resolve(ok()) },
       () => 0,
     ),
     diagnostics: new QueryDiagnosticsUseCase({
@@ -114,7 +119,7 @@ function fakeRuntime(): { runtime: HostRuntime; closedWith: string[] } {
       findByStreamId: () => Promise.resolve([]),
     }),
   };
-  return { runtime, closedWith };
+  return { runtime, closedWith, pinHashes };
 }
 
 function fakeIO(promptUrl = 'http://localhost:3000'): {
@@ -124,12 +129,13 @@ function fakeIO(promptUrl = 'http://localhost:3000'): {
   composedWith: HostOptions[];
   fireSigint: () => void;
   closedWith: string[];
+  pinHashes: string[];
 } {
   const out: string[] = [];
   const errs: string[] = [];
   const composedWith: HostOptions[] = [];
   const sigintHandlers: Array<() => void> = [];
-  const { runtime, closedWith } = fakeRuntime();
+  const { runtime, closedWith, pinHashes } = fakeRuntime();
   const io: CliIO = {
     write: (line) => out.push(line),
     error: (line) => errs.push(line),
@@ -141,7 +147,7 @@ function fakeIO(promptUrl = 'http://localhost:3000'): {
     promptLocalUrl: () => Promise.resolve(promptUrl),
     generatePin: () => '847291',
   };
-  return { io, out, errs, composedWith, fireSigint: () => sigintHandlers.forEach((h) => h()), closedWith };
+  return { io, out, errs, composedWith, fireSigint: () => sigintHandlers.forEach((h) => h()), closedWith, pinHashes };
 }
 
 describe('run', () => {
