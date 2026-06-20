@@ -34,10 +34,11 @@ build-time injection needed. The host CLI reads its own env vars from `src/confi
 npm run build --prefix viewer
 
 # Expected output structure:
-#   viewer/dist/__beam/sw.js       — service worker (fixed filename)
-#   viewer/dist/assets/main-*.js   — main bundle (hashed)
-#   viewer/dist/index.html         — root HTML
-#   viewer/dist/_headers           — CF Pages headers config (copied from viewer/public/)
+#   viewer/dist/__beam/sw.js              — service worker (fixed filename)
+#   viewer/dist/assets/sw-bridge-*.js     — SW↔main bridge (hashed)
+#   viewer/dist/assets/main-*.js          — main app bundle (hashed)
+#   viewer/dist/index.html                — root HTML
+#   viewer/dist/_headers                  — CF Pages headers config (copied from viewer/public/)
 ```
 
 ---
@@ -47,7 +48,7 @@ npm run build --prefix viewer
 ### 1. Signaling Worker
 
 ```bash
-wrangler deploy --config signaling/wrangler.toml
+wrangler deploy --config signaling/wrangler.jsonc
 ```
 
 No Durable Object migration needed — the DO schema is append-only.
@@ -102,14 +103,19 @@ Changing any one of these without updating the others will break the relay.
 
 ## S18 Pre-Flight Checks
 
-Before running the live E2E suite (S18), confirm these two items:
+Before running the live E2E suite (S18), confirm these items:
 
-1. **RTCDataChannel message size ceiling**: Chromium/Firefox have a ~16 KiB
-   per-message interop limit on `RTCDataChannel`. `MAX_FRAME_SIZE` is 256 KiB + 9 bytes.
-   Verify at S18 that `BrowserDataChannelAdapter.send()` does not silently drop
-   frames larger than 16 KiB, or reduce `MAX_PAYLOAD_SIZE` to ≤ 16368 bytes (16 KiB − 9).
+1. **RTCDataChannel message size ceiling**: `MAX_PAYLOAD_SIZE` is already set to
+   `16375` bytes (`16384 − HEADER_SIZE 9`) — the SCTP interop ceiling. Proof 0
+   in S18 confirms this holds at the wire. No code change needed unless Proof 0
+   surfaces a lower ceiling on the target browser version.
 
-2. **`mux.openStreamIds()` accessor**: The `ViewerConnection` wrapper exposes
+2. **PIN gate**: The viewer shows a 6-digit PIN form before establishing the
+   WebRTC connection. The host CLI prints the PIN at startup. The signaling DO
+   verifies the SHA-256 hash and enforces a 3-attempt lockout. No additional
+   deploy config needed — it is entirely runtime behaviour in the DO and viewer.
+
+3. **`mux.openStreamIds()` accessor**: The `ViewerConnection` wrapper exposes
    `openStreamIds()` via `trackedStreamIds`. Confirm at S18 that bootstrap's
    `conn.onclose((openStreamIds) => { ... })` receives the correct live IDs under
    real transport-close conditions.
