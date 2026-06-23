@@ -26,15 +26,13 @@ import { hashPin, PIN_HASH_KEY, PIN_ATTEMPTS_KEY, PIN_MAX_ATTEMPTS } from './pin
 
 const USED_PREFIX = 'used:';
 
+// Storage keys — survive DO hibernation (in-memory state does NOT).
+const PIN_VERIFIED_KEY = 'pin-verified';
+const PENDING_COUNT_KEY = 'pending-count';
+const PENDING_PREFIX = 'pending:';
+
 export class SessionDurableObject {
   private readonly mintLimiter = new RateLimiter({ maxPerWindow: 30, windowMs: 60_000 });
-
-  // Host messages (offer + ICE) buffered until viewer completes PIN verification.
-  private readonly pendingForViewer: Array<string | ArrayBuffer> = [];
-
-  // True once the viewer has submitted a correct PIN. In-memory only; resets on
-  // DO hibernation (acceptable — the PIN exchange is fast, within one ICE window).
-  private viewerPinVerified = false;
 
   constructor(private readonly state: DurableObjectState) {}
 
@@ -74,16 +72,10 @@ export class SessionDurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
     this.state.acceptWebSocket(server, [assignment.role]);
-    // Flush buffered host messages only after PIN is verified — not here.
-    // (viewerPinVerified will be true if the viewer reconnects post-verification
-    // within the same DO lifetime, which is the same in-memory flag check.)
-    if (assignment.role === 'viewer' && this.viewerPinVerified && this.pendingForViewer.length > 0) {
-      this.flushPendingToViewer();
-    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const size = typeof message === 'string' ? message.length : message.byteLength;
     if (!isWithinSizeCap(size)) {
       ws.close(1009, 'message-too-large');
@@ -98,25 +90,30 @@ export class SessionDurableObject {
     if (typeof message === 'string') {
       const control = tryParseControl(message);
       if (control !== null) {
-        void this.handleControl(ws, senderRole, control);
+        await this.handleControl(ws, senderRole, control);
         return;
       }
     }
 
     // Opaque relay: viewer must be PIN-verified before host messages are forwarded.
-    this.relayMessage(senderRole, message);
+    await this.relayMessage(senderRole, message);
   }
 
-  private relayMessage(senderRole: PeerRole, message: string | ArrayBuffer): void {
+  private async relayMessage(senderRole: PeerRole, message: string | ArrayBuffer): Promise<void> {
     const targets = this.state.getWebSockets(relayTargetRole(senderRole));
-    if (targets.length === 0 || (senderRole === 'host' && !this.viewerPinVerified)) {
-      if (senderRole === 'host') {
-        this.pendingForViewer.push(message);
+    const pinVerified = (await this.state.storage.get<boolean>(PIN_VERIFIED_KEY)) === true;
+
+    if (targets.length === 0 || (senderRole === 'host' && !pinVerified)) {
+      if (senderRole === 'host' && typeof message === 'string') {
+        // Persist to storage — in-memory state does not survive DO hibernation.
+        const count = (await this.state.storage.get<number>(PENDING_COUNT_KEY)) ?? 0;
+        await this.state.storage.put(`${PENDING_PREFIX}${count}`, message);
+        await this.state.storage.put(PENDING_COUNT_KEY, count + 1);
       }
       return;
     }
     for (const peer of targets) {
-      peer.send(message);
+      try { peer.send(message); } catch { /* target WS already closed — drop silently */ }
     }
   }
 
@@ -147,7 +144,6 @@ export class SessionDurableObject {
   private async handlePinVerify(ws: WebSocket, rawPin: string): Promise<void> {
     const storedHash = await this.state.storage.get<string>(PIN_HASH_KEY);
     if (!storedHash) {
-      // Host never registered a PIN — treat as lockout (no PIN = no entry).
       ws.close(1008, 'pin-locked');
       return;
     }
@@ -173,20 +169,37 @@ export class SessionDurableObject {
       return;
     }
 
-    // PIN correct — promote viewer and flush buffered host messages.
-    this.viewerPinVerified = true;
+    // PIN correct — mark verified in persistent storage, then flush buffered SDP/ICE.
+    await this.state.storage.put(PIN_VERIFIED_KEY, true);
     ws.send(JSON.stringify({ type: 'pin-ok' }));
-    this.flushPendingToViewer();
+    await this.flushPendingToViewer();
   }
 
-  private flushPendingToViewer(): void {
+  private async flushPendingToViewer(): Promise<void> {
     const viewers = this.state.getWebSockets('viewer');
-    for (const viewer of viewers) {
-      for (const msg of this.pendingForViewer) {
-        viewer.send(msg);
+    if (viewers.length === 0) return;
+
+    const count = (await this.state.storage.get<number>(PENDING_COUNT_KEY)) ?? 0;
+    if (count === 0) return;
+
+    // Load in insertion order (keys are 'pending:0', 'pending:1', ...).
+    const entries = await this.state.storage.list<string>({ prefix: PENDING_PREFIX });
+    const sortedKeys = [...entries.keys()].sort((a, b) => {
+      return parseInt(a.slice(PENDING_PREFIX.length)) - parseInt(b.slice(PENDING_PREFIX.length));
+    });
+
+    for (const key of sortedKeys) {
+      const msg = entries.get(key);
+      if (msg !== undefined) {
+        for (const viewer of viewers) {
+          try { viewer.send(msg); } catch { /* viewer WS already closed */ }
+        }
       }
     }
-    this.pendingForViewer.length = 0;
+
+    // Clean up storage after flush.
+    await this.state.storage.delete(PENDING_COUNT_KEY);
+    await Promise.all(sortedKeys.map((k) => this.state.storage.delete(k)));
   }
 
   private currentRoles(): PeerRole[] {

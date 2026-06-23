@@ -7,7 +7,7 @@
 import type { PeerTransport, Unsubscribe } from '../../src/domain/interfaces.js';
 import { parseMessage, serializeMessage, type IceCandidate } from './signaling-messages.js';
 import { createViewerMultiplexer } from './protocol-bridge.js';
-import type { StreamMultiplexer } from './protocol-bridge.js';
+import type { StreamMultiplexer, Frame } from './protocol-bridge.js';
 import { BrowserDataChannelAdapter } from './browser-datachannel.js';
 
 export interface BrowserPeer {
@@ -41,6 +41,7 @@ export class ViewerConnection {
   // C2: viewer-side open stream tracking (StreamMultiplexer.streams is private)
   private trackedStreamIds: Set<number> = new Set();
   private mux: StreamMultiplexer | null = null;
+  private transport: PeerTransport | null = null;
 
   constructor(
     private peer: BrowserPeer,
@@ -66,14 +67,20 @@ export class ViewerConnection {
     this.socket.onmessage((text) => {
       this.handleSignalingMessage(text);
     });
+    // Only close the peer if the DataChannel has not been established yet.
+    // Once the DataChannel is open the signaling WS is no longer needed —
+    // a WS idle-timeout or network blip should not terminate an active relay.
     this.socket.onclose(() => {
-      this.peer.close();
+      if (this.mux === null) {
+        this.peer.close();
+      }
     });
   }
 
   private handleDataChannel(channel: RTCDataChannel): void {
     console.log('[VIEWER] ondatachannel fired');
     const transport: PeerTransport = new BrowserDataChannelAdapter(channel);
+    this.transport = transport;
     const mux = createViewerMultiplexer(transport);
     this.mux = mux;
 
@@ -168,6 +175,17 @@ export class ViewerConnection {
   /** C2: return open relay stream IDs. Used by bootstrap to emit relay-errors on disconnect. */
   openStreamIds(): number[] {
     return [...this.trackedStreamIds];
+  }
+
+  /**
+   * Send a request frame directly over the DataChannel transport, bypassing
+   * the mux's stream registry. The mux is only used for INBOUND response
+   * frames (which auto-open via acceptInbound). Outbound request frames use
+   * SW-assigned stream IDs that the mux has no record of, so writeFrame would
+   * return StreamRejected. Direct send avoids that.
+   */
+  sendFrame(frame: Frame): void {
+    this.transport?.send(frame);
   }
 
   onconnectionstate(handler: (state: ConnectionState) => void): Unsubscribe {

@@ -107,36 +107,40 @@ self.addEventListener('fetch', (event) => {
 });
 
 async function handleFetch(streamId: number, request: Request): Promise<Response> {
-  const result = await enqueue(streamId, RELAY_TIMEOUT_MS, gate);
-  if (!result.ok) return result.response; // 504 — never rejects (B3)
+  try {
+    const result = await enqueue(streamId, RELAY_TIMEOUT_MS, gate);
+    if (!result.ok) return result.response; // 504 — never rejects (B3)
 
-  const source = gate.source as WindowClient | null;
-  if (!source) return make504('no-source');
+    const source = gate.source as WindowClient | null;
+    if (!source) return make504('no-source');
 
-  // Fully buffer request body (S-c: no request-side streaming in v1)
-  const bodyBytes = request.body
-    ? new Uint8Array(await request.arrayBuffer())
-    : new Uint8Array(0);
+    // Fully buffer request body (S-c: no request-side streaming in v1)
+    const bodyBytes = request.body
+      ? new Uint8Array(await request.arrayBuffer())
+      : new Uint8Array(0);
 
-  // Build path (pathname + search) — host decodeRequestHead expects 'path', not full URL
-  const reqUrl = new URL(request.url);
-  const path = reqUrl.pathname + (reqUrl.search ?? '');
+    // Build path (pathname + search) — host decodeRequestHead expects 'path', not full URL
+    const reqUrl = new URL(request.url);
+    const path = reqUrl.pathname + (reqUrl.search ?? '');
 
-  // Collect headers as [name, value] pairs (hop-by-hop stripped by LoopbackReplayClient)
-  const headers: Array<[string, string]> = [];
-  request.headers.forEach((value, name) => { headers.push([name, value]); });
+    // Collect headers as [name, value] pairs — cap total JSON size to avoid
+    // exceeding MAX_PAYLOAD_SIZE (16 KiB) on requests with very large headers.
+    const headers: Array<[string, string]> = [];
+    request.headers.forEach((value, name) => { headers.push([name, value]); });
 
-  // Encode into REQUEST_HEAD + REQUEST_BODY_CHUNK* + REQUEST_END frames.
-  // Each frame is sent as a separate relay-request so bootstrap can write them
-  // into the mux in order without reconstructing a compound buffer.
-  const frames = encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
-  for (const frame of frames) {
-    source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
+    // Encode into REQUEST_HEAD + REQUEST_BODY_CHUNK* + REQUEST_END frames.
+    const frames = encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
+    for (const frame of frames) {
+      source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
+    }
+
+    return new Promise<Response>((resolve) => {
+      responseResolvers.set(streamId, resolve);
+    });
+  } catch (err) {
+    trackStreamClose(streamId, gate);
+    return make504(`internal: ${err instanceof Error ? err.message : String(err)}`);
   }
-
-  return new Promise<Response>((resolve) => {
-    responseResolvers.set(streamId, resolve);
-  });
 }
 
 function make504(reason: string): Response {
