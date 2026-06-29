@@ -238,6 +238,7 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
     if (!msg || msg.type !== 'relay-request' || typeof msg.streamId !== 'number') return;
 
     const streamId = msg.streamId;
+    console.log(`[PAGE] relay-request sid=${String(streamId)} dataLen=${String(msg.data?.byteLength ?? 0)}`);
 
     // Register the response listener on the first frame for this stream only.
     if (!listeningStreams.has(streamId)) {
@@ -246,10 +247,13 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
 
       const unsubscribe = mux.onInbound((frame) => {
         if (frame.streamId !== streamId) return;
+        console.log(`[PAGE] inbound frame sid=${String(streamId)} type=${String(frame.type)}`);
         const encoded = encodeFrame(frame);
         const sw = navigator.serviceWorker.controller;
         if (sw) {
           sw.postMessage(serializeSwMessage({ type: 'relay-response', streamId, data: encoded }));
+        } else {
+          console.log(`[PAGE] WARN controller null — relay-response dropped sid=${String(streamId)}`);
         }
         if (frame.type === 6 /* RESPONSE_END */ || frame.type === 7 /* ERROR */) {
           unsubscribe();
@@ -262,7 +266,10 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
     // Decode the encoded Beam frame bytes and write into the mux.
     if (msg.data && msg.data.byteLength > 0) {
       const frame = decodeFrame(msg.data);
-      if (!isFrameDecodeError(frame)) {
+      if (isFrameDecodeError(frame)) {
+        console.log(`[PAGE] decodeFrame ERROR sid=${String(streamId)}`, frame);
+      } else {
+        console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)}`);
         mux.writeFrame(frame);
       }
     }

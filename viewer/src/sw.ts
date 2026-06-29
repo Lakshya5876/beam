@@ -114,36 +114,45 @@ self.addEventListener('fetch', (event) => {
     });
   }
 
-  event.respondWith(handleFetch(streamId, event.request));
+  event.respondWith(handleFetch(streamId, event.request, event.clientId));
 });
 
-async function handleFetch(streamId: number, request: Request): Promise<Response> {
-  try {
-    const result = await enqueue(streamId, RELAY_TIMEOUT_MS, gate);
-    if (!result.ok) return result.response; // 504 — never rejects (B3)
+async function resolveRelayTarget(clientId: string): Promise<WindowClient | null> {
+  if (clientId) {
+    const fetchClient = await self.clients.get(clientId);
+    if (fetchClient) return fetchClient as WindowClient;
+  }
+  return gate.source as WindowClient | null;
+}
 
-    const source = gate.source as WindowClient | null;
+function postRelayFrames(source: WindowClient, streamId: number, frames: ReturnType<typeof encodeRequest>): void {
+  for (const frame of frames) {
+    console.log(`[SW] posting relay-request sid=${String(streamId)} frameType=${String(frame.type)}`);
+    source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
+  }
+  console.log(`[SW] all frames posted sid=${String(streamId)} count=${String(frames.length)}`);
+}
+
+async function handleFetch(streamId: number, request: Request, clientId: string): Promise<Response> {
+  try {
+    console.log(`[SW] fetch sid=${String(streamId)} ready=${String(gate.ready)} clientId=${clientId}`);
+    const result = await enqueue(streamId, RELAY_TIMEOUT_MS, gate);
+    if (!result.ok) return result.response;
+
+    // Prefer the fetch event's own clientId over the stored gate.source.
+    // gate.source can be stale after a SW restart + re-arm cycle.
+    const source = await resolveRelayTarget(clientId);
+    console.log(`[SW] relay target sid=${String(streamId)} hasSource=${String(source !== null)}`);
     if (!source) return make504('no-source');
 
-    // Fully buffer request body (S-c: no request-side streaming in v1)
-    const bodyBytes = request.body
-      ? new Uint8Array(await request.arrayBuffer())
-      : new Uint8Array(0);
-
-    // Build path (pathname + search) — host decodeRequestHead expects 'path', not full URL
+    const bodyBytes = request.body ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array(0);
     const reqUrl = new URL(request.url);
     const path = reqUrl.pathname + (reqUrl.search ?? '');
-
-    // Collect headers as [name, value] pairs — cap total JSON size to avoid
-    // exceeding MAX_PAYLOAD_SIZE (16 KiB) on requests with very large headers.
     const headers: Array<[string, string]> = [];
     request.headers.forEach((value, name) => { headers.push([name, value]); });
 
-    // Encode into REQUEST_HEAD + REQUEST_BODY_CHUNK* + REQUEST_END frames.
     const frames = encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
-    for (const frame of frames) {
-      source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
-    }
+    postRelayFrames(source, streamId, frames);
 
     return new Promise<Response>((resolve) => {
       responseResolvers.set(streamId, resolve);
