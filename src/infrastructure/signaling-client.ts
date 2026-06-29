@@ -79,7 +79,8 @@ export class WebSocketSignalingClient implements SignalingClient {
 
   /** Pure URL construction. SessionCode is branded [a-z0-9]{26,} — URL-safe. */
   buildUrl(code: SessionCode): string {
-    return `${this.baseUrl.replace(/\/+$/, '')}/${code}`;
+    const base = this.baseUrl.replace(/\/+$/, '').replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
+    return `${base}/${code}`;
   }
 
   connect(code: SessionCode): Promise<Result<undefined, SignalingConnectError>> {
