@@ -103,6 +103,17 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/__beam/')) return; // Beam bootstrap assets — pass through
   if (url.origin !== self.location.origin) return;  // Cross-origin — pass through
   const streamId = nextStreamId(gate);
+
+  // SW restart recovery: if gate state was lost (SW terminated while idle), pull
+  // mux-ready from all window clients instead of waiting for a one-shot push that
+  // already fired into the previous SW instance and is now gone.
+  if (!gate.ready) {
+    void self.clients.matchAll({ type: 'window' }).then((clients) => {
+      const msg = serializeSwMessage({ type: 'request-mux-ready' });
+      for (const client of clients) client.postMessage(msg);
+    });
+  }
+
   event.respondWith(handleFetch(streamId, event.request));
 });
 

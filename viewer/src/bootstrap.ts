@@ -20,7 +20,7 @@ import { BrowserPeerAdapter } from './browser-peer.js';
 import { BrowserWebSocketAdapter } from './browser-signaling.js';
 import { ViewerConnection } from './viewer-connection.js';
 import { renderConnecting, renderFailed, renderPinEntry, renderPinFailed, renderPinLocked, renderUnsupported } from './pages.js';
-import { serializeSwMessage } from './sw-bridge.js';
+import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
 
@@ -66,8 +66,9 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   ws.addEventListener('error', () => { console.log('[VIEWER-BOOT] WS ERROR'); });
 
   // M3 PIN gate: show PIN form, wait for DO to confirm or lock.
-  const pinOk = await requestPinVerification(ws, root);
-  if (!pinOk) {
+  // Returns buffered post-pin-ok messages to prevent the offer-drop race.
+  const buffered = await requestPinVerification(ws, root);
+  if (buffered === null) {
     return; // renderPinLocked already shown inside requestPinVerification
   }
 
@@ -79,6 +80,10 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
   const conn = new ViewerConnection(peerAdapter, socketAdapter);
+  console.log(`[VIEWER-BOOT] replaying ${String(buffered.length)} buffered post-pin-ok messages`);
+  for (const event of buffered) {
+    ws.dispatchEvent(new MessageEvent('message', { data: event.data }));
+  }
 
   conn.onconnectionstate((state) => {
     if (state === 'connected') {
@@ -105,10 +110,17 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 
 /**
  * Show the PIN entry form in root, let the user submit, and negotiate with the DO.
- * Returns true on pin-ok (WebRTC can start), false on pin-locked or WS close.
+ * Returns buffered post-pin-ok messages on success (so the caller can replay them
+ * into ViewerConnection before any new messages arrive), or null on failure.
+ *
+ * Race prevention: after pin-ok the DO immediately flushes buffered SDP/ICE onto
+ * the same WebSocket. Those messages arrive as separate macro tasks, so they land
+ * after the microtask queue drains (ViewerConnection setup). But to be safe we
+ * buffer ALL non-pin messages that arrive after pin-ok and return them to the
+ * caller so they can be replayed once ViewerConnection's handler is registered.
  */
-async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise<MessageEvent[] | null> {
+  return new Promise<MessageEvent[] | null>((resolve) => {
     root.innerHTML = renderPinEntry();
 
     function wireForm(): void {
@@ -126,13 +138,28 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
 
     wireForm();
 
+    // After pin-ok, buffer all arriving messages until ViewerConnection is ready.
+    const postPinBuffer: MessageEvent[] = [];
+
     function onMessage(event: MessageEvent): void {
       const control = parsePinControl(event.data as unknown);
-      if (!control) return;
+
+      if (control === null) {
+        // Not a pin control message — if we're already past pin-ok, buffer it.
+        if (postPinBuffer !== null) {
+          postPinBuffer.push(event);
+        }
+        return;
+      }
 
       if (control.type === 'pin-ok') {
+        console.log('[VIEWER-BOOT] pin-ok received');
+        // Keep the listener active to buffer any messages that arrive before
+        // ViewerConnection registers its own handler.
+        // Swap to buffer-only mode: stop processing control messages.
         ws.removeEventListener('message', onMessage);
-        resolve(true);
+        ws.addEventListener('message', (e) => { postPinBuffer.push(e); });
+        resolve(postPinBuffer);
       } else if (control.type === 'pin-failed') {
         const left = control.attemptsLeft ?? 0;
         console.log(`[VIEWER-BOOT] pin-failed attemptsLeft=${String(left)}`);
@@ -141,7 +168,7 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
       } else if (control.type === 'pin-locked') {
         ws.removeEventListener('message', onMessage);
         root.innerHTML = renderPinLocked();
-        resolve(false);
+        resolve(null);
       }
     }
 
@@ -153,7 +180,7 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
       if (root.querySelector('#beam-pin-form')) {
         root.innerHTML = renderPinLocked();
       }
-      resolve(false);
+      resolve(null);
     }, { once: true });
   });
 }
@@ -167,16 +194,43 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
  * Beam frame: REQUEST_HEAD, REQUEST_BODY_CHUNK*, REQUEST_END).  The response
  * listener must be registered exactly once per stream — on the first message —
  * and frames for the same stream are written on every subsequent message.
+ *
+ * SW controller timing: on a fresh registration the SW activates and calls
+ * clients.claim() asynchronously. navigator.serviceWorker.controller may be
+ * null when the DataChannel first opens. We wait for the controllerchange
+ * event in that case before sending mux-ready.
  */
 function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, sessionCode: string): void {
-  const sw = navigator.serviceWorker.controller;
-  if (!sw) return;
-
-  // B1: now that mux exists, tell the SW it's ready (mux-ready, not claim-ready)
-  sw.postMessage(serializeSwMessage({ type: 'mux-ready', sessionCode }));
+  if (!navigator.serviceWorker) return;
 
   // Track which streams already have a response listener to avoid duplicates.
   const listeningStreams = new Set<number>();
+
+  // Send mux-ready once the SW is controlling this page. On a fresh registration
+  // navigator.serviceWorker.controller is null until clients.claim() fires
+  // controllerchange — so we wait for that event if needed.
+  function sendMuxReady(): void {
+    const controller = navigator.serviceWorker.controller;
+    if (!controller) {
+      console.log('[VIEWER-BOOT] SW controller not ready — waiting for controllerchange');
+      navigator.serviceWorker.addEventListener('controllerchange', sendMuxReady, { once: true });
+      return;
+    }
+    console.log('[VIEWER-BOOT] sending mux-ready to SW');
+    controller.postMessage(serializeSwMessage({ type: 'mux-ready', sessionCode }));
+  }
+  sendMuxReady();
+
+  // SW restart recovery: re-send mux-ready whenever the SW asks for it.
+  // A fresh SW instance has gate.ready=false and cannot receive the one-shot
+  // mux-ready that already fired into the previous instance.
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const msg = parseSwMessage(event.data as unknown);
+    if (msg?.type === 'request-mux-ready') {
+      console.log('[VIEWER-BOOT] SW requested mux-ready re-send');
+      sendMuxReady();
+    }
+  });
 
   // Handle relay-request frames from the SW
   navigator.serviceWorker.addEventListener('message', (event) => {
@@ -193,9 +247,10 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
       const unsubscribe = mux.onInbound((frame) => {
         if (frame.streamId !== streamId) return;
         const encoded = encodeFrame(frame);
-        sw.postMessage(
-          serializeSwMessage({ type: 'relay-response', streamId, data: encoded }),
-        );
+        const sw = navigator.serviceWorker.controller;
+        if (sw) {
+          sw.postMessage(serializeSwMessage({ type: 'relay-response', streamId, data: encoded }));
+        }
         if (frame.type === 6 /* RESPONSE_END */ || frame.type === 7 /* ERROR */) {
           unsubscribe();
           listeningStreams.delete(streamId);

@@ -144,4 +144,27 @@ describe('sw-fetch-gate', () => {
     expect(gate.openStreams.has(10)).toBe(false);
     expect(gate.openStreams.has(11)).toBe(true);
   });
+
+  it('SW restart recovery: pending fetch resolves ok:true when mux-ready arrives before timeout', async () => {
+    // Scenario: SW was terminated (gate reset to not-ready), fetch arrived, SW sent
+    // request-mux-ready to the page, page re-sent mux-ready, gate receives onMuxReady.
+    const streamId = nextStreamId(gate);
+    const promise = enqueue(streamId, 5000, gate);
+
+    expect(gate.ready).toBe(false);
+    expect(gate.pending).toHaveLength(1);
+
+    // Page responds to request-mux-ready: SW calls handleMuxReady → onMuxReady + flush
+    const toFlush = onMuxReady(FAKE_SOURCE, 'testcode', gate as FetchGate & { source: typeof FAKE_SOURCE | null });
+    expect(toFlush).toHaveLength(1);
+    clearTimeout(toFlush[0]!.timer);
+    gate.pending.splice(gate.pending.indexOf(toFlush[0]!), 1);
+    toFlush[0]!.resolve({ ok: true });
+
+    // Advance past the original timeout — must not fire (timer was cleared)
+    vi.advanceTimersByTime(5001);
+
+    const result = await promise;
+    expect(result.ok).toBe(true);
+  });
 });

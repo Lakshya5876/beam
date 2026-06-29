@@ -1,5 +1,6 @@
 export type SwMessage =
   | { type: 'mux-ready'; sessionCode: string }
+  | { type: 'request-mux-ready' }
   | { type: 'relay-request'; streamId: number; data: Uint8Array }
   | { type: 'relay-response'; streamId: number; data: Uint8Array }
   | { type: 'relay-error'; streamId: number; reason: 'disconnect' | 'stream-cap-exceeded' | 'internal' };
@@ -32,6 +33,7 @@ export function parseSwMessage(data: unknown): SwMessage | null {
   if (typeof data !== 'object' || data === null) return null;
   const msg = data as RawMsg;
   if (msg.type === 'mux-ready') return parseMuxReady(msg);
+  if (msg.type === 'request-mux-ready') return { type: 'request-mux-ready' };
   if (msg.type === 'relay-request') return parseRelayData('relay-request', msg);
   if (msg.type === 'relay-response') return parseRelayData('relay-response', msg);
   if (msg.type === 'relay-error') return parseRelayError(msg);
