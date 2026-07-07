@@ -47,23 +47,23 @@ export async function fetchIceServers(signalingBaseUrl: string): Promise<RTCIceS
     }
     const body = (await resp.json()) as { iceServers?: unknown };
     if (Array.isArray(body.iceServers) && body.iceServers.length > 0) {
-      console.log(`[VIEWER-BOOT] ice-config loaded: ${String(body.iceServers.length)} server(s)`);
+// console.log(`[VIEWER-BOOT] ice-config loaded: ${String(body.iceServers.length)} server(s)`);
       return body.iceServers as RTCIceServer[];
     }
     return FALLBACK_ICE_SERVERS;
   } catch {
-    console.log('[VIEWER-BOOT] ice-config fetch failed — using STUN fallback');
+// console.log('[VIEWER-BOOT] ice-config fetch failed — using STUN fallback');
     return FALLBACK_ICE_SERVERS;
   }
 }
 
 export async function bootstrap(signalingBaseUrl: string): Promise<void> {
-  console.log(`[VIEWER-BOOT] bootstrap() signalingBaseUrl=${signalingBaseUrl}`);
+// console.log(`[VIEWER-BOOT] bootstrap() signalingBaseUrl=${signalingBaseUrl}`);
   const root = document.getElementById('beam-root');
   if (!root) return;
 
   const verdict = detectSupport(readBrowserCapabilities());
-  console.log(`[VIEWER-BOOT] feature detection: supported=${String(verdict.supported)}`);
+// console.log(`[VIEWER-BOOT] feature detection: supported=${String(verdict.supported)}`);
   if (!verdict.supported) {
     root.textContent = renderUnsupported(verdict.missing);
     return;
@@ -73,18 +73,18 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // Requires Service-Worker-Allowed: / header on /__beam/sw.js (S17 obligation).
   if (navigator.serviceWorker) {
     try {
-      console.log('[VIEWER-BOOT] registering SW /__beam/sw.js');
+// console.log('[VIEWER-BOOT] registering SW /__beam/sw.js');
       await navigator.serviceWorker.register('/__beam/sw.js', { scope: '/', type: 'module' });
-      console.log('[VIEWER-BOOT] SW registered');
+// console.log('[VIEWER-BOOT] SW registered');
     } catch (e) {
-      console.log('[VIEWER-BOOT] SW registration FAILED:', e);
+// console.log('[VIEWER-BOOT] SW registration FAILED:', e);
     }
   } else {
-    console.log('[VIEWER-BOOT] navigator.serviceWorker unavailable');
+// console.log('[VIEWER-BOOT] navigator.serviceWorker unavailable');
   }
 
   const sessionCode = extractSessionCode();
-  console.log(`[VIEWER-BOOT] sessionCode=${String(sessionCode)}`);
+// console.log(`[VIEWER-BOOT] sessionCode=${String(sessionCode)}`);
   if (!sessionCode) {
     root.textContent = renderFailed('no session code');
     return;
@@ -92,7 +92,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 
   const base = signalingBaseUrl.replace(new RegExp(`/${sessionCode}$`), '');
   const wsUrl = buildViewerSignalingUrl(base, sessionCode);
-  console.log(`[VIEWER-BOOT] base=${base} wsUrl=${wsUrl}`);
+// console.log(`[VIEWER-BOOT] base=${base} wsUrl=${wsUrl}`);
   const ws = new WebSocket(wsUrl);
   ws.addEventListener('open', () => { console.log('[VIEWER-BOOT] WS OPEN'); });
   ws.addEventListener('close', (e) => { console.log(`[VIEWER-BOOT] WS CLOSE code=${String(e.code)} reason=${e.reason}`); });
@@ -109,7 +109,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 
   const iceServers = await fetchIceServers(base);
   const pc = new RTCPeerConnection({ iceServers });
-  console.log('[VIEWER-BOOT] RTCPeerConnection created');
+// console.log('[VIEWER-BOOT] RTCPeerConnection created');
 
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
@@ -121,7 +121,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // tens of thousands of duplicate offers in the local e2e harness).
   buffered.stop();
   const replay = buffered.events.splice(0);
-  console.log(`[VIEWER-BOOT] replaying ${String(replay.length)} buffered post-pin-ok messages`);
+// console.log(`[VIEWER-BOOT] replaying ${String(replay.length)} buffered post-pin-ok messages`);
   for (const event of replay) {
     ws.dispatchEvent(new MessageEvent('message', { data: event.data }));
   }
@@ -179,7 +179,7 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
       form.addEventListener('submit', (e) => {
         e.preventDefault();
         const raw = input.value.replace(/\s/g, '');
-        console.log(`[VIEWER-BOOT] submitting PIN (${String(raw.length)} chars)`);
+// console.log(`[VIEWER-BOOT] submitting PIN (${String(raw.length)} chars)`);
         ws.send(JSON.stringify({ type: 'pin', value: raw }));
       }, { once: true });
     }
@@ -201,7 +201,7 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
       }
 
       if (control.type === 'pin-ok') {
-        console.log('[VIEWER-BOOT] pin-ok received');
+// console.log('[VIEWER-BOOT] pin-ok received');
         // Swap to buffer-only mode: capture messages until the caller has
         // ViewerConnection listening, then the caller calls stop() and
         // replays. The named listener makes it detachable — an anonymous
@@ -212,7 +212,7 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
         resolve({ events: postPinBuffer, stop: () => { ws.removeEventListener('message', capture); } });
       } else if (control.type === 'pin-failed') {
         const left = control.attemptsLeft ?? 0;
-        console.log(`[VIEWER-BOOT] pin-failed attemptsLeft=${String(left)}`);
+// console.log(`[VIEWER-BOOT] pin-failed attemptsLeft=${String(left)}`);
         root.innerHTML = renderPinFailed(left);
         wireForm();
       } else if (control.type === 'pin-locked') {
@@ -262,11 +262,11 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
   function sendMuxReady(): void {
     const controller = navigator.serviceWorker.controller;
     if (!controller) {
-      console.log('[VIEWER-BOOT] SW controller not ready — waiting for controllerchange');
+// console.log('[VIEWER-BOOT] SW controller not ready — waiting for controllerchange');
       navigator.serviceWorker.addEventListener('controllerchange', sendMuxReady, { once: true });
       return;
     }
-    console.log('[VIEWER-BOOT] sending mux-ready to SW');
+// console.log('[VIEWER-BOOT] sending mux-ready to SW');
     controller.postMessage(serializeSwMessage({ type: 'mux-ready', sessionCode }));
   }
   sendMuxReady();
@@ -277,7 +277,7 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
   navigator.serviceWorker.addEventListener('message', (event) => {
     const msg = parseSwMessage(event.data as unknown);
     if (msg?.type === 'request-mux-ready') {
-      console.log('[VIEWER-BOOT] SW requested mux-ready re-send');
+// console.log('[VIEWER-BOOT] SW requested mux-ready re-send');
       sendMuxReady();
     }
   });
@@ -288,7 +288,7 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
     if (!msg || msg.type !== 'relay-request' || typeof msg.streamId !== 'number') return;
 
     const streamId = msg.streamId;
-    console.log(`[PAGE] relay-request sid=${String(streamId)} dataLen=${String(msg.data?.byteLength ?? 0)}`);
+// console.log(`[PAGE] relay-request sid=${String(streamId)} dataLen=${String(msg.data?.byteLength ?? 0)}`);
 
     // Register the response listener on the first frame for this stream only.
     if (!listeningStreams.has(streamId)) {
@@ -298,18 +298,18 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
       // which rejects unknown streams as 'not-open'.
       const adopted = mux.adoptStream(streamId);
       if (!adopted.ok) {
-        console.log(`[PAGE] adoptStream REJECTED sid=${String(streamId)} reason=${adopted.error.reason}`);
+// console.log(`[PAGE] adoptStream REJECTED sid=${String(streamId)} reason=${adopted.error.reason}`);
       }
 
       const unsubscribe = mux.onInbound((frame) => {
         if (frame.streamId !== streamId) return;
-        console.log(`[PAGE] inbound frame sid=${String(streamId)} type=${String(frame.type)}`);
+// console.log(`[PAGE] inbound frame sid=${String(streamId)} type=${String(frame.type)}`);
         const encoded = encodeFrame(frame);
         const sw = navigator.serviceWorker.controller;
         if (sw) {
           sw.postMessage(serializeSwMessage({ type: 'relay-response', streamId, data: encoded }));
         } else {
-          console.log(`[PAGE] WARN controller null — relay-response dropped sid=${String(streamId)}`);
+// console.log(`[PAGE] WARN controller null — relay-response dropped sid=${String(streamId)}`);
         }
         if (frame.type === 6 /* RESPONSE_END */ || frame.type === 7 /* ERROR */) {
           unsubscribe();
@@ -330,11 +330,11 @@ function writeRelayFrame(mux: StreamMultiplexer, streamId: number, data: Uint8Ar
   }
   const frame = decodeFrame(data);
   if (isFrameDecodeError(frame)) {
-    console.log(`[PAGE] decodeFrame ERROR sid=${String(streamId)}`, frame);
+// console.log(`[PAGE] decodeFrame ERROR sid=${String(streamId)}`, frame);
     return;
   }
   const written = mux.writeFrame(frame);
-  console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)} ok=${String(written.ok)}${written.ok ? '' : ` reason=${JSON.stringify(written.error)}`}`);
+// console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)} ok=${String(written.ok)}${written.ok ? '' : ` reason=${JSON.stringify(written.error)}`}`);
 }
 
 /**

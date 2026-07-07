@@ -7,7 +7,7 @@
 # executes MAIN'S copy. CI parity is only authoritative because the gate
 # script cannot be edited by the change under review.
 #
-# GOVERNANCE EVOLUTION PATH: .githooks/, CLAUDE.md, .claude/settings.json and
+# GOVERNANCE EVOLUTION PATH: .githooks/, Architecture Guidelines, .claude/settings.json and
 # this workflow are CODEOWNERS-gated (see .github/CODEOWNERS) and change only
 # via human-reviewed PR to the protected branch. The authoritative hooks
 # baseline is whatever origin/main holds AFTER an approved merge — never a

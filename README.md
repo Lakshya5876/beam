@@ -46,7 +46,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a full design walkthrough.
 npm install -g @beamtunnel/cli     # requires Node >= 22
 
 # From source
-git clone https://github.com/beamtunnel/beam
+git clone https://github.com/Lakshya5876/beam
 cd beam && npm ci && npm run build
 ```
 

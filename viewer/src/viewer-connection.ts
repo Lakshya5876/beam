@@ -109,7 +109,7 @@ export class ViewerConnection {
   }
 
   private handleDataChannel(channel: RTCDataChannel): void {
-    console.log('[VIEWER] ondatachannel fired');
+// console.log('[VIEWER] ondatachannel fired');
     const transport: PeerTransport = new BrowserDataChannelAdapter(channel);
     this.transport = transport;
     const mux = createViewerMultiplexer(transport);
@@ -117,7 +117,7 @@ export class ViewerConnection {
 
     // N3: on transport close, emit open stream IDs so bootstrap can send relay-errors
     transport.onClose(() => {
-      console.log('[VIEWER] transport closed — firing close handlers');
+// console.log('[VIEWER] transport closed — firing close handlers');
       const openIds = [...this.trackedStreamIds];
       for (const handler of this.closeHandlers) {
         handler(openIds);
@@ -125,20 +125,20 @@ export class ViewerConnection {
       this.trackedStreamIds.clear();
     });
 
-    console.log('[VIEWER] mux ready — firing mux handlers');
+// console.log('[VIEWER] mux ready — firing mux handlers');
     for (const handler of this.muxHandlers) {
       handler(mux);
     }
   }
 
   private async handleSignalingMessage(text: string): Promise<void> {
-    console.log(`[VIEWER] signaling message received len=${text.length}`);
+// console.log(`[VIEWER] signaling message received len=${text.length}`);
     const msg = parseMessage(text);
     if (!msg) {
-      console.log('[VIEWER] signaling message DROPPED (parse failed)');
+// console.log('[VIEWER] signaling message DROPPED (parse failed)');
       return;
     }
-    console.log(`[VIEWER] signaling kind=${msg.kind}`);
+// console.log(`[VIEWER] signaling kind=${msg.kind}`);
     if (msg.kind === 'offer') {
       await this.handleOffer(msg.payload as string);
     } else if (msg.kind === 'ice-candidate') {
@@ -147,26 +147,26 @@ export class ViewerConnection {
   }
 
   private async handleOffer(sdp: string): Promise<void> {
-    console.log(`[VIEWER] handleOffer: applyRemoteDescription sdp.length=${sdp.length}`);
+// console.log(`[VIEWER] handleOffer: applyRemoteDescription sdp.length=${sdp.length}`);
     await this.peer.applyRemoteDescription(sdp);
     this.remoteDescriptionApplied = true;
-    console.log('[VIEWER] handleOffer: createAnswer');
+// console.log('[VIEWER] handleOffer: createAnswer');
     const answer = await this.peer.createAnswer();
-    console.log(`[VIEWER] handleOffer: setLocalDescription answer.length=${answer.length}`);
+// console.log(`[VIEWER] handleOffer: setLocalDescription answer.length=${answer.length}`);
     await this.peer.setLocalDescription(answer);
-    console.log('[VIEWER] handleOffer: sending answer via signaling');
+// console.log('[VIEWER] handleOffer: sending answer via signaling');
     await this.socket.send(serializeMessage('answer', answer));
-    console.log('[VIEWER] handleOffer: flushing pending candidates');
+// console.log('[VIEWER] handleOffer: flushing pending candidates');
     await this.flushPendingCandidates();
-    console.log('[VIEWER] handleOffer: complete');
+// console.log('[VIEWER] handleOffer: complete');
   }
 
   private async handleRemoteCandidate(candidate: IceCandidate): Promise<void> {
     if (this.ipv4Only && isIpv6Candidate(candidate.candidate)) {
-      console.log('[VIEWER] handleRemoteCandidate SKIPPED (ipv4-only)');
+// console.log('[VIEWER] handleRemoteCandidate SKIPPED (ipv4-only)');
       return;
     }
-    console.log(`[VIEWER] handleRemoteCandidate buffered=${!this.remoteDescriptionApplied}`);
+// console.log(`[VIEWER] handleRemoteCandidate buffered=${!this.remoteDescriptionApplied}`);
     if (!this.remoteDescriptionApplied) {
       this.pendingCandidates.push(candidate);
       return;
@@ -183,15 +183,15 @@ export class ViewerConnection {
 
   private handleLocalCandidate(candidate: IceCandidate): void {
     if (this.ipv4Only && isIpv6Candidate(candidate.candidate)) {
-      console.log('[VIEWER] handleLocalCandidate SKIPPED (ipv4-only)');
+// console.log('[VIEWER] handleLocalCandidate SKIPPED (ipv4-only)');
       return;
     }
-    console.log('[VIEWER] sending local ICE candidate');
+// console.log('[VIEWER] sending local ICE candidate');
     this.socket.send(serializeMessage('ice-candidate', candidate));
   }
 
   private handleConnectionStateChange(state: string): void {
-    console.log(`[VIEWER] connectionstatechange: ${state}`);
+// console.log(`[VIEWER] connectionstatechange: ${state}`);
     if (state === 'connected') {
       this.connectionState = 'connected';
       for (const handler of this.stateHandlers) handler('connected');

@@ -1,6 +1,6 @@
 # npm Publish Checklist — @beamtunnel/cli
 
-Publish is a human-only action on the deploy machine (LOCAL-ONLY, CLAUDE.md
+Publish is a human-only action on the deploy machine (LOCAL-ONLY, Architecture Guidelines
 §3). Prerequisite: RELEASE_CHECKLIST.md Phase 3 (live two-network test) has
 passed.
 

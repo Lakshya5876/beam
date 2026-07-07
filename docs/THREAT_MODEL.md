@@ -202,7 +202,7 @@
 
 ---
 
-## 3. Security Invariants (from CLAUDE.md — enforced at commit)
+## 3. Security Invariants (from Architecture Guidelines — enforced at commit)
 
 These are non-negotiable and mechanically verified by the pre-commit gate:
 

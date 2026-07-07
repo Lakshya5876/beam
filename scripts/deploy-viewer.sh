@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy the Beam viewer to Cloudflare Pages. HUMAN-ONLY, DEPLOY MACHINE ONLY.
-# Refuses to run without explicit confirmation (CLAUDE.md §3 LOCAL-ONLY).
+# Refuses to run without explicit confirmation (Architecture Guidelines §3 LOCAL-ONLY).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="${BEAM_PAGES_PROJECT:-beam-viewer}"

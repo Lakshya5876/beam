@@ -69,7 +69,7 @@ function handleRelayResponse(streamId: number, frameBytes: Uint8Array): void {
   // variant was caught by the local e2e harness).
   if (frame.type === FrameType.ERROR) {
     const reason = new TextDecoder().decode(frame.payload) || 'relay error';
-    console.log(`[SW] ERROR frame sid=${String(streamId)} reason=${reason}`);
+// console.log(`[SW] ERROR frame sid=${String(streamId)} reason=${reason}`);
     handleRelayError(streamId, reason);
     return;
   }
@@ -140,22 +140,22 @@ async function resolveRelayTarget(clientId: string): Promise<WindowClient | null
 
 function postRelayFrames(source: WindowClient, streamId: number, frames: ReturnType<typeof encodeRequest>): void {
   for (const frame of frames) {
-    console.log(`[SW] posting relay-request sid=${String(streamId)} frameType=${String(frame.type)}`);
+// console.log(`[SW] posting relay-request sid=${String(streamId)} frameType=${String(frame.type)}`);
     source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
   }
-  console.log(`[SW] all frames posted sid=${String(streamId)} count=${String(frames.length)}`);
+// console.log(`[SW] all frames posted sid=${String(streamId)} count=${String(frames.length)}`);
 }
 
 async function handleFetch(streamId: number, request: Request, clientId: string): Promise<Response> {
   try {
-    console.log(`[SW] fetch sid=${String(streamId)} ready=${String(gate.ready)} clientId=${clientId}`);
+// console.log(`[SW] fetch sid=${String(streamId)} ready=${String(gate.ready)} clientId=${clientId}`);
     const result = await enqueue(streamId, RELAY_TIMEOUT_MS, gate);
     if (!result.ok) return result.response;
 
     // Prefer the fetch event's own clientId over the stored gate.source.
     // gate.source can be stale after a SW restart + re-arm cycle.
     const source = await resolveRelayTarget(clientId);
-    console.log(`[SW] relay target sid=${String(streamId)} hasSource=${String(source !== null)}`);
+// console.log(`[SW] relay target sid=${String(streamId)} hasSource=${String(source !== null)}`);
     if (!source) return make504('no-source');
 
     const bodyBytes = request.body ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array(0);

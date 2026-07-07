@@ -1,7 +1,7 @@
 # Configuration Reference — every knob in one place
 
 Resolution order everywhere: **CLI flag > environment variable > compiled
-default**. Nothing else reads `process.env` (CLAUDE.md §3 — all env access
+default**. Nothing else reads `process.env` (Architecture Guidelines §3 — all env access
 goes through `src/config.ts`).
 
 ## Host CLI (`bm`)
@@ -52,7 +52,7 @@ human edit if missing):
 
 ```
 # Beam — environment template. Placeholder keys ONLY; real values are
-# injected at shell level and NEVER written to disk (CLAUDE.md §3).
+# injected at shell level and NEVER written to disk (Architecture Guidelines §3).
 BEAM_LOG_LEVEL=info
 APP_PORT=8080
 # Deployment endpoints (flag > env > compiled default)

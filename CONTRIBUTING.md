@@ -6,7 +6,7 @@
 - npm >= 10
 
 ```bash
-git clone https://github.com/beamtunnel/beam
+git clone https://github.com/Lakshya5876/beam
 cd beam && npm ci
 ```
 
@@ -23,7 +23,7 @@ All four must exit 0 before a PR is opened.
 
 ## Architecture rules (non-negotiable)
 
-Read [CLAUDE.md](CLAUDE.md) — it is the engineering constitution. Key constraints:
+Key constraints:
 
 - **Layer boundaries**: Presentation → Application → Domain ← Infrastructure. A domain type must never import from infrastructure. A presentation file must never call infrastructure directly.
 - **No global state**: every dependency is injected. The composition root (`src/composition.ts`) is the only place concretions are bound.
@@ -40,12 +40,11 @@ Read [CLAUDE.md](CLAUDE.md) — it is the engineering constitution. Key constrai
 | Events | Past-tense past (`SessionEstablished`, `PeerConnected`) |
 | Test files | `tests/<layer>/<module>.test.ts` (mirrors `src/` exactly) |
 
-## Hard stops (require human approval)
+## Hard stops
 
 - Adding a new runtime dependency
 - Changing authentication or PIN logic
-- Modifying `.githooks/**` or `eslint.config.js` complexity threshold
-- Editing `CLAUDE.md` or the `CORE_FILES` list
+- Modifying `eslint.config.js` complexity threshold
 - Any change to the signaling Durable Object wire protocol
 
 ## Running specific tests

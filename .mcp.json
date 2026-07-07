@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "code-review-graph": {
-      "command": "/Users/lakshyadiwani/.local/bin/code-review-graph",
-      "args": ["serve"]
-    }
-  }
-}

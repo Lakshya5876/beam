@@ -39,9 +39,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/beamtunnel/beam.git"
+    "url": "https://github.com/Lakshya5876/beam.git"
   },
-  "homepage": "https://github.com/beamtunnel/beam#readme",
+  "homepage": "https://github.com/Lakshya5876/beam#readme",
   "dependencies": {
     "node-datachannel": "0.32.1"
   },
