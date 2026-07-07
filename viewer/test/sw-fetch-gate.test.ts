@@ -5,6 +5,7 @@ import {
   nextStreamId,
   onMuxGone,
   onMuxReady,
+  shouldBypassRelay,
   trackStreamClose,
   trackStreamOpen,
   MAX_CONCURRENT_STREAMS,
@@ -166,5 +167,26 @@ describe('sw-fetch-gate', () => {
 
     const result = await promise;
     expect(result.ok).toBe(true);
+  });
+});
+
+describe('shouldBypassRelay — viewer own-asset exclusion', () => {
+  it('bypasses the app shell root', () => {
+    expect(shouldBypassRelay('/')).toBe(true);
+  });
+
+  it('bypasses the vite-hashed asset bundle', () => {
+    expect(shouldBypassRelay('/assets/main-abc123.js')).toBe(true);
+    expect(shouldBypassRelay('/assets/sw-bridge-xyz.js')).toBe(true);
+  });
+
+  it('bypasses Beam bootstrap assets under /__beam/', () => {
+    expect(shouldBypassRelay('/__beam/sw.js')).toBe(true);
+  });
+
+  it('relays everything else — the tunneled target paths', () => {
+    expect(shouldBypassRelay('/api/users')).toBe(false);
+    expect(shouldBypassRelay('/smoke-test')).toBe(false);
+    expect(shouldBypassRelay('/index.html')).toBe(false);
   });
 });

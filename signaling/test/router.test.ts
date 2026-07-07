@@ -29,3 +29,17 @@ describe('routeRequest', () => {
     expect(routeRequest('GET', 'not a url', true)).toEqual({ kind: 'reject', status: 400, reason: 'bad-url' });
   });
 });
+
+describe('routeRequest — /ice-config', () => {
+  it('routes GET /ice-config as ice-config', () => {
+    expect(routeRequest('GET', `${BASE}/ice-config`, false)).toEqual({ kind: 'ice-config' });
+  });
+
+  it('rejects non-GET /ice-config with 405', () => {
+    expect(routeRequest('POST', `${BASE}/ice-config`, false)).toEqual({
+      kind: 'reject',
+      status: 405,
+      reason: 'ice-config-requires-get',
+    });
+  });
+});

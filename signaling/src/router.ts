@@ -7,9 +7,11 @@
 import { parseSessionCodeFromUrl } from './url.js';
 
 export const MINT_PATH = '/new';
+export const ICE_CONFIG_PATH = '/ice-config';
 
 export type RouteDecision =
   | { readonly kind: 'mint' }
+  | { readonly kind: 'ice-config' }
   | { readonly kind: 'pair'; readonly code: string }
   | { readonly kind: 'reject'; readonly status: number; readonly reason: string };
 
@@ -25,6 +27,12 @@ export function routeRequest(method: string, url: string, isWebSocketUpgrade: bo
       return { kind: 'reject', status: 405, reason: 'mint-requires-post' };
     }
     return { kind: 'mint' };
+  }
+  if (pathname === ICE_CONFIG_PATH) {
+    if (method !== 'GET') {
+      return { kind: 'reject', status: 405, reason: 'ice-config-requires-get' };
+    }
+    return { kind: 'ice-config' };
   }
   if (!isWebSocketUpgrade) {
     return { kind: 'reject', status: 426, reason: 'expected-websocket-upgrade' };

@@ -17,8 +17,11 @@ function makeFrame(type: number, payloadBytes: Uint8Array): Frame {
   return { type: type as Frame['type'], streamId, payload };
 }
 
-function headFrame(status = 200, statusText = 'OK', headers: [string, string][] = []): Frame {
-  const json = JSON.stringify({ status, statusText, headers });
+// Host contract (encodeResponseHead): {status, headers} with Record headers.
+// No statusText on the wire — corrected after the local e2e harness caught
+// the old array-of-pairs shape rejecting every real host response.
+function headFrame(status = 200, headers: Record<string, string> = {}): Frame {
+  const json = JSON.stringify({ status, headers });
   return makeFrame(FrameType.RESPONSE_HEAD, new TextEncoder().encode(json));
 }
 
@@ -37,12 +40,11 @@ describe('ResponseAssembler', () => {
     assembler = new ResponseAssembler();
   });
 
-  it('RESPONSE_HEAD sets status and headers on the built Response', async () => {
-    const result = assembler.feed(headFrame(201, 'Created', [['x-custom', 'val']]));
+  it('RESPONSE_HEAD sets status and headers on the built Response', () => {
+    const result = assembler.feed(headFrame(201, { 'x-custom': 'val' }));
     expect(result).toBe('continue');
     const response = assembler.buildResponse();
     expect(response.status).toBe(201);
-    expect(response.statusText).toBe('Created');
     expect(response.headers.get('x-custom')).toBe('val');
     assembler.feed(endFrame());
   });
@@ -104,7 +106,7 @@ describe('ResponseAssembler', () => {
 
   it('second RESPONSE_HEAD returns error', () => {
     assembler.feed(headFrame());
-    const result = assembler.feed(headFrame(404, 'Not Found'));
+    const result = assembler.feed(headFrame(404));
     expect(result).toBe('error');
   });
 });

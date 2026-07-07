@@ -11,16 +11,19 @@ import {
 
 const STREAM_ID = 1;
 
+// Headers are a string Record — the host's decodeRequestHead contract.
+// (The array-of-pairs shape previously used here never interoperated with
+// the host; corrected after the local e2e harness caught the mismatch.)
 const GET_REQ: RequestLike = {
   method: 'GET',
   path: '/api/users',
-  headers: [['accept', 'application/json']],
+  headers: { accept: 'application/json' },
 };
 
 const POST_REQ: RequestLike = {
   method: 'POST',
   path: '/api/data',
-  headers: [['content-type', 'application/json']],
+  headers: { 'content-type': 'application/json' },
   body: new TextEncoder().encode('{"hello":"world"}'),
 };
 

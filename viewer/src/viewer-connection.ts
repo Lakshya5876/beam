@@ -6,6 +6,10 @@
 
 import type { PeerTransport, Unsubscribe } from '../../src/domain/interfaces.js';
 import { parseMessage, serializeMessage, type IceCandidate } from './signaling-messages.js';
+
+// Consumers (browser-peer.ts, tests) take IceCandidate from this module's
+// BrowserPeer seam — re-export so the type gate holds.
+export type { IceCandidate };
 import { createViewerMultiplexer } from './protocol-bridge.js';
 import type { StreamMultiplexer, Frame } from './protocol-bridge.js';
 import { BrowserDataChannelAdapter } from './browser-datachannel.js';
@@ -30,6 +34,30 @@ export interface SignalingSocket {
 
 export type ConnectionState = 'connecting' | 'connected' | 'failed';
 
+export interface ViewerConnectionOptions {
+  /**
+   * Drop IPv6 ICE candidates on both sides — mirrors PeerConnectionTransport's
+   * ipv4Only (src/infrastructure/peer-connection.ts). The host CLI's
+   * --ipv4-only flag only filters the HOST's own candidates; without a
+   * matching filter here, the viewer's browser-gathered IPv6 candidates (and
+   * IPv6 candidates the host still forwards) can still be raced, undermining
+   * the mitigation. Enabled via the `?ipv4=1` query param the CLI appends to
+   * the viewer URL when --ipv4-only is set (see bootstrap.ts).
+   */
+  readonly ipv4Only?: boolean;
+}
+
+/**
+ * True when the candidate's connection address (5th field) is an IPv6
+ * literal. Duplicated from src/infrastructure/peer-connection.ts's
+ * isIpv6Candidate: the viewer bundle cannot import Node-only host code.
+ */
+export function isIpv6Candidate(candidate: string): boolean {
+  const fields = candidate.trim().split(/\s+/);
+  const addr = fields[4];
+  return addr !== undefined && addr.includes(':');
+}
+
 export class ViewerConnection {
   private remoteDescriptionApplied = false;
   private pendingCandidates: IceCandidate[] = [];
@@ -37,6 +65,7 @@ export class ViewerConnection {
   private stateHandlers: Array<(state: ConnectionState) => void> = [];
   private muxHandlers: Array<(mux: StreamMultiplexer) => void> = [];
   private closeHandlers: Array<(openStreamIds: number[]) => void> = [];
+  private readonly ipv4Only: boolean;
 
   // C2: viewer-side open stream tracking (StreamMultiplexer.streams is private)
   private trackedStreamIds: Set<number> = new Set();
@@ -46,7 +75,9 @@ export class ViewerConnection {
   constructor(
     private peer: BrowserPeer,
     private socket: SignalingSocket,
+    options: ViewerConnectionOptions = {},
   ) {
+    this.ipv4Only = options.ipv4Only ?? false;
     this.setupPeerHandlers();
     this.setupSocketHandlers();
   }
@@ -131,6 +162,10 @@ export class ViewerConnection {
   }
 
   private async handleRemoteCandidate(candidate: IceCandidate): Promise<void> {
+    if (this.ipv4Only && isIpv6Candidate(candidate.candidate)) {
+      console.log('[VIEWER] handleRemoteCandidate SKIPPED (ipv4-only)');
+      return;
+    }
     console.log(`[VIEWER] handleRemoteCandidate buffered=${!this.remoteDescriptionApplied}`);
     if (!this.remoteDescriptionApplied) {
       this.pendingCandidates.push(candidate);
@@ -147,6 +182,10 @@ export class ViewerConnection {
   }
 
   private handleLocalCandidate(candidate: IceCandidate): void {
+    if (this.ipv4Only && isIpv6Candidate(candidate.candidate)) {
+      console.log('[VIEWER] handleLocalCandidate SKIPPED (ipv4-only)');
+      return;
+    }
     console.log('[VIEWER] sending local ICE candidate');
     this.socket.send(serializeMessage('ice-candidate', candidate));
   }

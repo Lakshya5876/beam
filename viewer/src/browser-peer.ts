@@ -22,9 +22,11 @@ export class BrowserPeerAdapter implements BrowserPeer {
   }
 
   async addIceCandidate(candidate: IceCandidate): Promise<void> {
+    // Missing mid → '0': first m-line, matching the host-side convention in
+    // composition.ts parseRemoteCandidate.
     await this.pc.addIceCandidate({
       candidate: candidate.candidate,
-      sdpMid: candidate.mid,
+      sdpMid: candidate.mid ?? '0',
     });
   }
 
@@ -33,7 +35,7 @@ export class BrowserPeerAdapter implements BrowserPeer {
       if (event.candidate) {
         handler({
           candidate: event.candidate.candidate,
-          mid: event.candidate.sdpMid,
+          mid: event.candidate.sdpMid ?? '0',
         });
       }
     };

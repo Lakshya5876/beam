@@ -382,3 +382,62 @@ describe('totality under an adversarial frame flood', () => {
     expect(rejections).toContain('concurrency-cap');
   });
 });
+
+describe('adoptStream — externally-assigned ids (SW-allocated on the viewer)', () => {
+  it('adopts an id so writeFrame succeeds where it was rejected before', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    expect(mux.writeFrame(frame(FrameType.REQUEST_HEAD, 7)).ok).toBe(false);
+    const adopted = mux.adoptStream(7);
+    expect(adopted.ok).toBe(true);
+    expect(mux.writeFrame(frame(FrameType.REQUEST_HEAD, 7)).ok).toBe(true);
+    expect(transport.sent.map((f) => f.streamId)).toEqual([7]);
+  });
+
+  it('is idempotent for a live stream', () => {
+    const mux = new StreamMultiplexer(new FakeTransport());
+    expect(mux.adoptStream(3).ok).toBe(true);
+    expect(mux.adoptStream(3).ok).toBe(true);
+    expect(mux.openCount()).toBe(1);
+  });
+
+  it('keeps openStream monotonic past adopted ids (no reuse)', () => {
+    const mux = new StreamMultiplexer(new FakeTransport());
+    mux.adoptStream(5);
+    const next = mux.openStream();
+    expect(next.ok).toBe(true);
+    if (next.ok) {
+      expect(next.value).toBe(6);
+    }
+  });
+
+  it('rejects an invalid id with a typed error', () => {
+    const mux = new StreamMultiplexer(new FakeTransport());
+    const zero = mux.adoptStream(0);
+    expect(zero.ok).toBe(false);
+    if (!zero.ok) {
+      expect(zero.error.reason).toBe('invalid-id');
+    }
+  });
+
+  it('enforces the concurrency cap', () => {
+    const mux = new StreamMultiplexer(new FakeTransport(), { ...DEFAULT_MULTIPLEXER_LIMITS, maxConcurrentStreams: 2 });
+    expect(mux.adoptStream(1).ok).toBe(true);
+    expect(mux.adoptStream(2).ok).toBe(true);
+    const third = mux.adoptStream(3);
+    expect(third.ok).toBe(false);
+    if (!third.ok) {
+      expect(third.error.reason).toBe('concurrency-cap');
+    }
+  });
+
+  it('inbound responses route on an adopted stream', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    mux.adoptStream(9);
+    const seen: number[] = [];
+    mux.onInbound((f) => seen.push(f.streamId));
+    transport.emit(frame(FrameType.RESPONSE_HEAD, 9));
+    expect(seen).toEqual([9]);
+  });
+});

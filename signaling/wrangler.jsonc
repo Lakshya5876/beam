@@ -1,8 +1,6 @@
 {
-  // Beam signaling Worker config. SCAFFOLD: main (src/worker.ts) and the
-  // SessionDurableObject class are implemented in S14b — `wrangler deploy
-  // --dry-run` is validated there, once the entry + DO class exist. Deploy
-  // itself is a human-only action (LOCAL-ONLY, CLAUDE.md §3).
+  // Beam signaling Worker config. Deploy is a human-only action performed
+  // off this machine (LOCAL-ONLY, CLAUDE.md §3) — see docs/deploy/.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "beam-signaling",
   "main": "src/worker.ts",
@@ -12,5 +10,15 @@
   "durable_objects": {
     "bindings": [{ "name": "SESSIONS", "class_name": "SessionDurableObject" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SessionDurableObject"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SessionDurableObject"] }],
+  // Deploy-time policy knobs. All optional — the worker falls back to these
+  // same defaults when a var is unset or malformed. ICE_SERVERS is a JSON
+  // array of RTCIceServer objects served publicly at GET /ice-config; do NOT
+  // put long-lived TURN credentials here (use short-lived creds — see
+  // docs/deploy/CLOUDFLARE_SETUP.md).
+  "vars": {
+    "ICE_SERVERS": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
+    "MINT_MAX_PER_MINUTE": "30",
+    "PIN_MAX_ATTEMPTS": "3"
+  }
 }

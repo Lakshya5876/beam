@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * CLI entry (design doc §10 S12, §A.3 consent). Presentation layer:
  * arg parsing + output formatting only; it composes via the composition root
@@ -12,6 +13,8 @@ import { parseArgs } from 'node:util';
 import { randomInt, createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { composeHost, type HostOptions, type HostRuntime } from '../composition.js';
+import { loadConfig, type BeamConfig } from '../config.js';
+import { createTimestampedLogger, describeSessionEvent } from './debug-log.js';
 
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: CliUsageError };
 
@@ -25,17 +28,27 @@ function pErr<T>(error: CliUsageError): Parsed<T> {
 
 export type CliParseResult = Parsed<CliOptions>;
 
+/**
+ * Compiled-in fallbacks. PLACEHOLDER-DEFAULT: these are NOT live endpoints —
+ * the release checklist (docs/deploy/RELEASE_CHECKLIST.md) requires replacing
+ * them with the real deployed URLs before `npm publish`. Resolution order at
+ * runtime: CLI flag > BEAM_SIGNALING_URL / BEAM_VIEWER_URL env > these.
+ */
 export const DEFAULT_SIGNALING_URL = 'wss://signal.beam.workers.dev';
 export const DEFAULT_VIEWER_URL = 'https://beam-viewer.pages.dev';
 
 export const USAGE =
-  'usage: bm [--allowed-paths /a,/b] [--ttl <seconds>] [--signaling <url>] [--viewer <url>]';
+  'usage: bm [<local-url>] [--allowed-paths /a,/b] [--ttl <seconds>] [--signaling <url>] [--viewer <url>] [--ice <urls>] [--ipv4-only] [--debug]';
 
 export interface CliOptions {
   readonly allowedPaths: string[];
+  readonly localUrl?: string;
   readonly ttlMs?: number;
   readonly signalingUrl?: string;
   readonly viewerUrl?: string;
+  readonly iceServers?: readonly string[];
+  readonly ipv4Only?: boolean;
+  readonly debug?: boolean;
 }
 
 export interface CliUsageError {
@@ -68,38 +81,75 @@ export function parseCliArgs(argv: readonly string[]): CliParseResult {
         ttl: { type: 'string' },
         signaling: { type: 'string' },
         viewer: { type: 'string' },
+        ice: { type: 'string' },
+        'ipv4-only': { type: 'boolean' },
+        debug: { type: 'boolean' },
       },
-      allowPositionals: false,
+      allowPositionals: true,
     });
   } catch {
     return pErr(usage('unrecognized arguments'));
+  }
+  if (parsed.positionals.length > 1) {
+    return pErr(usage('at most one positional argument (local URL or port) is allowed'));
   }
   const ttl = parseTtl(parsed.values.ttl);
   if (!ttl.ok) {
     return ttl;
   }
-  const allowedRaw = parsed.values['allowed-paths'];
-  const allowedPaths = allowedRaw ? allowedRaw.split(',').map((p) => p.trim()).filter((p) => p.length > 0) : [];
-  const base: CliOptions = {
-    allowedPaths,
-    ...(ttl.value !== undefined && { ttlMs: ttl.value }),
-    ...(parsed.values.signaling !== undefined && { signalingUrl: parsed.values.signaling }),
-    ...(parsed.values.viewer !== undefined && { viewerUrl: parsed.values.viewer }),
-  };
-  return pOk(base);
+  return pOk(assembleOptions(parsed.positionals[0], parsed.values, ttl.value));
 }
 
-/** Parse a user-typed local URL string → port number. Accepts bare host:port too. */
+function splitList(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const items = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  return items.length > 0 ? items : undefined;
+}
+
+function assembleOptions(
+  localUrl: string | undefined,
+  values: { readonly 'allowed-paths'?: string; readonly signaling?: string; readonly viewer?: string; readonly ice?: string; readonly 'ipv4-only'?: boolean; readonly debug?: boolean },
+  ttlMs: number | undefined,
+): CliOptions {
+  const iceServers = splitList(values.ice);
+  return {
+    allowedPaths: splitList(values['allowed-paths']) ?? [],
+    ...(localUrl !== undefined && { localUrl }),
+    ...(ttlMs !== undefined && { ttlMs }),
+    ...(values.signaling !== undefined && { signalingUrl: values.signaling }),
+    ...(values.viewer !== undefined && { viewerUrl: values.viewer }),
+    ...(iceServers !== undefined && { iceServers }),
+    ...(values['ipv4-only'] === true && { ipv4Only: true }),
+    ...(values.debug === true && { debug: true }),
+  };
+}
+
+function validPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
+}
+
+/** Parse a user-typed local URL string → port number. Accepts a bare port
+ *  ("3000"), bare host:port, or a full URL. */
 export function parseLocalUrl(raw: string): Parsed<number> {
+  const trimmed = raw.trim();
+  // Bare port first: new URL('http://3000') parses "3000" as an IPv4 integer
+  // ADDRESS (0.0.11.184) with no port — `bm 3000` silently relayed to :80.
+  // Caught by the local e2e harness (host replied ECONNREFUSED).
+  if (/^\d{1,5}$/.test(trimmed)) {
+    const port = Number(trimmed);
+    return validPort(port) ? pOk(port) : pErr(usage(`invalid port "${trimmed}" — expected 1-65535`));
+  }
   let url: URL;
   try {
-    url = new URL(raw.includes('://') ? raw : `http://${raw}`);
+    url = new URL(trimmed.includes('://') ? trimmed : `http://${trimmed}`);
   } catch {
     return pErr(usage(`invalid URL "${raw}" — expected e.g. http://localhost:3000`));
   }
   const portStr = url.port;
   const port = portStr ? Number(portStr) : (url.protocol === 'https:' ? 443 : 80);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+  if (!validPort(port)) {
     return pErr(usage(`no valid port in "${raw}"`));
   }
   return pOk(port);
@@ -161,13 +211,15 @@ async function startSession(
   viewerUrl: string,
   pin: string,
   io: CliIO,
+  mintTimeoutMs: number,
+  ipv4Only: boolean,
 ): Promise<void> {
   const baseUrl = signalingUrl.replace(/^ws(s?):\/\//, 'http$1://');
   const mintUrl = new URL('/new', baseUrl).href;
   let code: string;
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const timeoutId = setTimeout(() => controller.abort(), mintTimeoutMs);
     try {
       const resp = await fetch(mintUrl, { method: 'POST', signal: controller.signal });
       clearTimeout(timeoutId);
@@ -204,7 +256,7 @@ async function startSession(
     return;
   }
 
-  const sessionUrl = `${viewerUrl}/?signaling=${signalingUrl}/${code}`;
+  const sessionUrl = `${viewerUrl}/?signaling=${signalingUrl}/${code}${ipv4Only ? '&ipv4=1' : ''}`;
   const formattedPin = `${pin.slice(0, 3)} ${pin.slice(3)}`;
   io.write('');
   io.write(`  Viewer URL:   ${sessionUrl}`);
@@ -215,9 +267,45 @@ async function startSession(
 }
 
 /**
+ * Resolve effective endpoint/ICE settings: CLI flag > env (BeamConfig) >
+ * compiled default. Exported for tests.
+ */
+export interface ResolvedEndpoints {
+  readonly signalingUrl: string;
+  readonly viewerUrl: string;
+  readonly iceServers?: readonly string[];
+  readonly mintTimeoutMs: number;
+  readonly nativeLogLevel?: string;
+}
+
+export function resolveEndpoints(options: CliOptions, config: BeamConfig): ResolvedEndpoints {
+  const iceServers = options.iceServers ?? config.iceServers;
+  return {
+    signalingUrl: options.signalingUrl ?? config.signalingUrl ?? DEFAULT_SIGNALING_URL,
+    viewerUrl: options.viewerUrl ?? config.viewerUrl ?? DEFAULT_VIEWER_URL,
+    ...(iceServers !== undefined && { iceServers }),
+    mintTimeoutMs: config.mintTimeoutMs,
+    ...(config.nativeLogLevel !== undefined && { nativeLogLevel: config.nativeLogLevel }),
+  };
+}
+
+function buildHostOptions(port: number, options: CliOptions, resolved: ResolvedEndpoints, io: CliIO): HostOptions {
+  const base = {
+    localPort: port,
+    signalingUrl: resolved.signalingUrl,
+    allowedPaths: options.allowedPaths,
+    ...(resolved.iceServers !== undefined && { iceServers: resolved.iceServers }),
+    ...(resolved.nativeLogLevel !== undefined && { nativeLogLevel: resolved.nativeLogLevel }),
+    ...(options.ipv4Only === true && { ipv4Only: true }),
+    ...(options.debug === true && { debug: true, log: createTimestampedLogger((line) => { io.error(line); }) }),
+  };
+  return options.ttlMs === undefined ? base : { ...base, ttlMs: options.ttlMs };
+}
+
+/**
  * Parse flags, prompt for local URL, generate PIN, compose runtime, start session.
  */
-export async function run(argv: readonly string[], io: CliIO = defaultIO()): Promise<number> {
+export async function run(argv: readonly string[], io: CliIO = defaultIO(), env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const parsed = parseCliArgs(argv);
   if (!parsed.ok) {
     io.error(parsed.error.message);
@@ -226,7 +314,7 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO()): Pro
   }
   const options = parsed.value;
 
-  const rawUrl = await io.promptLocalUrl();
+  const rawUrl = options.localUrl !== undefined ? options.localUrl : await io.promptLocalUrl();
   const portResult = parseLocalUrl(rawUrl);
   if (!portResult.ok) {
     io.error(portResult.error.message);
@@ -238,15 +326,20 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO()): Pro
   io.write(securityBanner(rawUrl, options.allowedPaths));
 
   const pin = io.generatePin();
-  const signalingUrl = options.signalingUrl ?? DEFAULT_SIGNALING_URL;
-  const viewerUrl = options.viewerUrl ?? DEFAULT_VIEWER_URL;
-  const baseOptions = { localPort: port, signalingUrl, allowedPaths: options.allowedPaths };
-  const hostOptions: HostOptions = options.ttlMs === undefined ? baseOptions : { ...baseOptions, ttlMs: options.ttlMs };
-  const runtime = io.composeRuntime(hostOptions);
+  const resolved = resolveEndpoints(options, loadConfig(env));
+  const runtime = io.composeRuntime(buildHostOptions(port, options, resolved, io));
+  // Connection status lines: connecting is implicit; established/failed/closed
+  // print as they happen instead of leaving the user staring at silence.
+  runtime.session.onEvent((event) => {
+    const line = describeSessionEvent(event);
+    if (line !== null) {
+      io.write(line);
+    }
+  });
   io.onSigint(() => {
     void runtime.close('host interrupted (SIGINT)');
   });
-  await startSession(runtime, signalingUrl, viewerUrl, pin, io);
+  await startSession(runtime, resolved.signalingUrl, resolved.viewerUrl, pin, io, resolved.mintTimeoutMs, options.ipv4Only === true);
   return 0;
 }
 

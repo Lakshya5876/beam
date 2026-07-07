@@ -26,6 +26,7 @@ import { InMemoryRequestLogStore } from './infrastructure/request-log-store.js';
 import { LoopbackReplayClient } from './infrastructure/replay-client.js';
 import { WebSocketSignalingClient } from './infrastructure/signaling-client.js';
 import {
+  initNativeLogging,
   PeerConnectionTransport,
   type PeerConnectFailedError,
   type PeerSignalingError,
@@ -64,19 +65,31 @@ export interface ConnectablePeer extends PeerTransport {
   awaitConnected(): Promise<Result<undefined, PeerConnectFailedError>>;
 }
 
+export interface PeerCreationOptions {
+  readonly log?: (msg: string) => void;
+  readonly iceServers?: readonly string[];
+  readonly ipv4Only?: boolean;
+}
+
 export interface HostFactories {
   createLogStore(): RequestLogRepository;
   createReplayClient(localPort: number): ReplayClient;
-  createSignalingClient(signalingUrl: string): SignalingClient;
-  createPeer(): ConnectablePeer;
+  createSignalingClient(signalingUrl: string, log?: (msg: string) => void): SignalingClient;
+  createPeer(options?: PeerCreationOptions): ConnectablePeer;
 }
 
 // The ONLY place concrete infrastructure is instantiated.
 export const realFactories: HostFactories = {
   createLogStore: () => new InMemoryRequestLogStore(),
   createReplayClient: (localPort) => new LoopbackReplayClient(localPort),
-  createSignalingClient: (signalingUrl) => new WebSocketSignalingClient(signalingUrl),
-  createPeer: () => new PeerConnectionTransport({ role: 'offer' }),
+  createSignalingClient: (signalingUrl, log) => new WebSocketSignalingClient(signalingUrl, undefined, undefined, log),
+  createPeer: (options = {}) =>
+    new PeerConnectionTransport({
+      role: 'offer',
+      ...(options.log !== undefined && { log: options.log }),
+      ...(options.iceServers !== undefined && { iceServers: [...options.iceServers] }),
+      ...(options.ipv4Only === true && { ipv4Only: true }),
+    }),
 };
 
 function parseRemoteCandidate(payload: string): { candidate: string; mid: string } | null {
@@ -110,16 +123,25 @@ export function forwardLocalSignals(peer: ConnectablePeer, signaling: SignalingC
 /** Route inbound signaling messages into the peer (candidates buffer in S9). */
 export function applyRemoteSignals(signaling: SignalingClient, peer: ConnectablePeer): void {
   signaling.onMessage((message) => {
-    if (message.kind === 'ice-candidate') {
-      const parsed = parseRemoteCandidate(message.payload);
-      if (parsed) {
-        // Goes through the peer's buffering addRemoteCandidate (S9): a
-        // pre-remote-description candidate is queued, never passed to native.
-        peer.addRemoteCandidate(parsed.candidate, parsed.mid);
+    // setImmediate: the signaling callback fires on node-datachannel's native
+    // WebSocket thread; calling back into the native PeerConnection from
+    // inside it is native→native reentrancy that intermittently stalled ICE
+    // (host stuck in 'checking', never answering connectivity checks — caught
+    // by the local e2e harness). Deferring to the Node event loop serializes
+    // the two native layers. Ordering is preserved: setImmediate callbacks
+    // run FIFO, and addRemoteCandidate buffers until the description applies.
+    setImmediate(() => {
+      if (message.kind === 'ice-candidate') {
+        const parsed = parseRemoteCandidate(message.payload);
+        if (parsed) {
+          // Goes through the peer's buffering addRemoteCandidate (S9): a
+          // pre-remote-description candidate is queued, never passed to native.
+          peer.addRemoteCandidate(parsed.candidate, parsed.mid);
+        }
+        return;
       }
-      return;
-    }
-    peer.applyRemoteDescription(message.payload, message.kind);
+      peer.applyRemoteDescription(message.payload, message.kind);
+    });
   });
 }
 
@@ -242,6 +264,15 @@ export interface HostOptions {
   readonly allowedPaths?: readonly string[];
   readonly ttlMs?: number;
   readonly now?: () => number;
+  readonly debug?: boolean;
+  readonly iceServers?: readonly string[];
+  /** Debug sink; when set with debug, overrides the default stderr writer
+   *  (the CLI injects a timestamped timeline logger). */
+  readonly log?: (msg: string) => void;
+  /** libdatachannel log level (BEAM_NATIVE_LOG); unset = native logging off. */
+  readonly nativeLogLevel?: string;
+  /** Drop IPv6 ICE candidates both ways (--ipv4-only); see peer-connection. */
+  readonly ipv4Only?: boolean;
 }
 
 export interface HostRuntime {
@@ -254,10 +285,18 @@ export interface HostRuntime {
 
 export function composeHost(options: HostOptions, factories: HostFactories = realFactories): HostRuntime {
   const now = options.now ?? ((): number => Date.now());
+  const log = options.debug ? options.log ?? ((msg: string): void => { process.stderr.write(`${msg}\n`); }) : undefined;
+  if (options.nativeLogLevel !== undefined) {
+    initNativeLogging(options.nativeLogLevel);
+  }
   const logStore = factories.createLogStore();
   const replayClient = factories.createReplayClient(options.localPort);
-  const signaling = factories.createSignalingClient(options.signalingUrl);
-  const peer = factories.createPeer();
+  const signaling = factories.createSignalingClient(options.signalingUrl, log);
+  const peer = factories.createPeer({
+    ...(log !== undefined && { log }),
+    ...(options.iceServers !== undefined && { iceServers: options.iceServers }),
+    ...(options.ipv4Only === true && { ipv4Only: true }),
+  });
   const mux = new StreamMultiplexer(peer);
   const relay = new ExecuteRelayUseCase(replayClient);
   const recorder = new RecordRequestUseCase(logStore, now);

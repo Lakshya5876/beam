@@ -70,7 +70,7 @@ export interface StreamRejectedError {
 export interface StreamLimitError {
   readonly error: 'StreamLimitReached';
   readonly limit: number;
-  readonly reason: 'concurrency-cap' | 'id-space-exhausted';
+  readonly reason: 'concurrency-cap' | 'id-space-exhausted' | 'invalid-id';
 }
 
 export function isStreamRejectedError(value: unknown): value is StreamRejectedError {
@@ -128,6 +128,32 @@ export class StreamMultiplexer {
     }
     this.nextId += 1;
     this.streams.set(id, { inboundOpen: true, outboundOpen: true, bufferedBytes: 0 });
+    return ok(id);
+  }
+
+  /**
+   * Adopt an EXTERNALLY-assigned stream id for outbound use. The viewer's
+   * service worker allocates its own ids per intercepted fetch, so the page
+   * bridge must register them here before writeFrame — writeFrame on an
+   * unknown id is rejected 'not-open' (silently dropping the request was the
+   * first bug the local e2e harness caught). Idempotent for live streams;
+   * keeps openStream()'s monotonic counter ahead of adopted ids.
+   */
+  adoptStream(rawId: number): Result<StreamId, StreamLimitError> {
+    const id = createStreamId(rawId);
+    if (isInvalidStreamIdError(id)) {
+      return err({ error: 'StreamLimitReached', limit: this.limits.maxConcurrentStreams, reason: 'invalid-id' });
+    }
+    if (this.streams.has(rawId)) {
+      return ok(id);
+    }
+    if (this.openCount() >= this.limits.maxConcurrentStreams) {
+      return err({ error: 'StreamLimitReached', limit: this.limits.maxConcurrentStreams, reason: 'concurrency-cap' });
+    }
+    this.streams.set(id, { inboundOpen: true, outboundOpen: true, bufferedBytes: 0 });
+    if (rawId >= this.nextId) {
+      this.nextId = rawId + 1;
+    }
     return ok(id);
   }
 

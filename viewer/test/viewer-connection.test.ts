@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ViewerConnection, type BrowserPeer, type SignalingSocket, type IceCandidate } from '../src/viewer-connection.js';
+import { isIpv6Candidate, ViewerConnection, type BrowserPeer, type SignalingSocket, type IceCandidate } from '../src/viewer-connection.js';
 import { serializeMessage } from '../src/signaling-messages.js';
 
 class FakeBrowserPeer implements BrowserPeer {
@@ -179,5 +179,52 @@ describe('ViewerConnection (orchestration + candidate buffering)', () => {
 
     peer.triggerConnectionStateChange('disconnected');
     expect(states).toEqual(['connected', 'failed', 'failed']);
+  });
+});
+
+describe('ViewerConnection — ipv4Only candidate filtering', () => {
+  it('drops outbound IPv6 local candidates when ipv4Only is set', () => {
+    const peer = new FakeBrowserPeer();
+    const socket = new FakeSignalingSocket();
+    new ViewerConnection(peer, socket, { ipv4Only: true });
+
+    peer.sendIceCandidate({ candidate: 'candidate:1 1 UDP 211 2401:4900::1 599 typ host', mid: '0' });
+    peer.sendIceCandidate({ candidate: 'candidate:2 1 UDP 211 192.168.1.5 599 typ host', mid: '0' });
+
+    expect(socket.sentMessages).toHaveLength(1);
+    expect(socket.sentMessages[0]).toContain('192.168.1.5');
+  });
+
+  it('drops inbound IPv6 remote candidates when ipv4Only is set (post-offer, unbuffered path)', async () => {
+    const peer = new FakeBrowserPeer();
+    const socket = new FakeSignalingSocket();
+    new ViewerConnection(peer, socket, { ipv4Only: true });
+
+    socket.receiveMessage(serializeMessage('offer', 'offer-sdp'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    socket.receiveMessage(serializeMessage('ice-candidate', { candidate: 'candidate:1 1 UDP 211 2401:4900::1 599 typ host', mid: '0' }));
+    socket.receiveMessage(serializeMessage('ice-candidate', { candidate: 'candidate:2 1 UDP 211 192.168.1.5 599 typ host', mid: '0' }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(peer.addIceCandidateCalls).toHaveLength(1);
+    expect(peer.addIceCandidateCalls[0]?.candidate).toContain('192.168.1.5');
+  });
+
+  it('without ipv4Only, IPv6 candidates pass through as before', () => {
+    const peer = new FakeBrowserPeer();
+    const socket = new FakeSignalingSocket();
+    new ViewerConnection(peer, socket);
+
+    peer.sendIceCandidate({ candidate: 'candidate:1 1 UDP 211 2401:4900::1 599 typ host', mid: '0' });
+
+    expect(socket.sentMessages).toHaveLength(1);
+  });
+});
+
+describe('isIpv6Candidate', () => {
+  it('classifies candidate address family from the 5th field', () => {
+    expect(isIpv6Candidate('candidate:1 1 UDP 211 192.168.1.5 599 typ host')).toBe(false);
+    expect(isIpv6Candidate('candidate:2 1 UDP 211 2401:4900::1 599 typ host')).toBe(true);
   });
 });

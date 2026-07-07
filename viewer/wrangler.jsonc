@@ -1,8 +1,9 @@
 {
-  // Cloudflare Pages config for the viewer static bundle. SCAFFOLD ONLY.
-  // The viewer build output is dist/ (vite build). The actual
-  // `wrangler pages deploy` is a SEPARATE human deploy decision (S17),
-  // made off this machine — it is NEVER run here (outbound egress).
+  // Cloudflare Pages config for the viewer static bundle. The viewer build
+  // output is dist/ (vite build). `wrangler pages deploy` is a human-only
+  // action performed off this machine — see docs/deploy/CLOUDFLARE_SETUP.md.
+  // If the "beam-viewer" project name is taken, pick another and use that
+  // name in every deploy doc/script that references it.
   "name": "beam-viewer",
   "pages_build_output_dir": "dist"
 }

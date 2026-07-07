@@ -11,7 +11,9 @@ import {
 export interface RequestLike {
   readonly method: string;
   readonly path: string;
-  readonly headers: ReadonlyArray<[string, string]>;
+  /** Record shape — the host's decodeRequestHead rejects array-of-pairs
+   *  ('request head has invalid headers'); caught by the local e2e harness. */
+  readonly headers: Readonly<Record<string, string>>;
   readonly body?: Uint8Array;
 }
 

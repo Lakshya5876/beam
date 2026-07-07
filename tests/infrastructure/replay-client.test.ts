@@ -166,6 +166,90 @@ describe('LoopbackReplayClient — injection-safe (rejects before sending)', () 
     expect(result.ok).toBe(false);
     expect(captured).toHaveLength(0);
   });
+
+  it('rejects a path containing a NUL byte (path truncation on vulnerable servers)', async () => {
+    const captured: Captured[] = [];
+    const port = await startServer(capturing(captured));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/api\x00/secret' }));
+
+    expect(result.ok).toBe(false);
+    expect(captured).toHaveLength(0);
+  });
+});
+
+describe('LoopbackReplayClient — path traversal rejection', () => {
+  it('rejects a path with a raw .. segment', async () => {
+    const port = await startServer(capturing([]));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/../etc/passwd' }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.error).toBe('ReplayFailed');
+      expect(result.error.reason).toContain('traversal');
+    }
+  });
+
+  it('rejects a path with a mid-path .. segment', async () => {
+    const port = await startServer(capturing([]));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/api/../../../etc/shadow' }));
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a path with percent-encoded double-dot (%2e%2e)', async () => {
+    const port = await startServer(capturing([]));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/%2e%2e/etc/passwd' }));
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a path with mixed encoding (.%2e)', async () => {
+    const port = await startServer(capturing([]));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/.%2e/secret' }));
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a path containing %2f (encoded slash) which can bypass segment checks', async () => {
+    const port = await startServer(capturing([]));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/api%2f..%2fsecret' }));
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('allows a legitimate path that contains dots in a filename', async () => {
+    const captured: Captured[] = [];
+    const port = await startServer(capturing(captured));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/api/v1/data.csv' }));
+
+    expect(result.ok).toBe(true);
+    expect(captured).toHaveLength(1);
+  });
+
+  it('allows a path with a single dot segment (not traversal)', async () => {
+    const captured: Captured[] = [];
+    const port = await startServer(capturing(captured));
+    const client = new LoopbackReplayClient(port);
+
+    const result = await client.replay(request({ path: '/api/./resource' }));
+
+    expect(result.ok).toBe(true);
+    expect(captured).toHaveLength(1);
+  });
 });
 
 describe('LoopbackReplayClient — totality and port confinement', () => {

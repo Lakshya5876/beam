@@ -24,6 +24,39 @@ import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
 
+const FALLBACK_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+const ICE_CONFIG_TIMEOUT_MS = 3000;
+
+/**
+ * Fetch deploy-time ICE configuration from the signaling worker
+ * (GET /ice-config). Total: any failure — network, timeout, bad JSON —
+ * falls back to the public STUN default so the connection still attempts.
+ */
+export async function fetchIceServers(signalingBaseUrl: string): Promise<RTCIceServer[]> {
+  try {
+    const httpBase = signalingBaseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '');
+    // Strip a trailing session-code path segment if present: the worker
+    // serves /ice-config at the origin root.
+    const url = new URL('/ice-config', httpBase).href;
+    const controller = new AbortController();
+    const timer = setTimeout(() => { controller.abort(); }, ICE_CONFIG_TIMEOUT_MS);
+    const resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!resp.ok) {
+      return FALLBACK_ICE_SERVERS;
+    }
+    const body = (await resp.json()) as { iceServers?: unknown };
+    if (Array.isArray(body.iceServers) && body.iceServers.length > 0) {
+      console.log(`[VIEWER-BOOT] ice-config loaded: ${String(body.iceServers.length)} server(s)`);
+      return body.iceServers as RTCIceServer[];
+    }
+    return FALLBACK_ICE_SERVERS;
+  } catch {
+    console.log('[VIEWER-BOOT] ice-config fetch failed — using STUN fallback');
+    return FALLBACK_ICE_SERVERS;
+  }
+}
+
 export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   console.log(`[VIEWER-BOOT] bootstrap() signalingBaseUrl=${signalingBaseUrl}`);
   const root = document.getElementById('beam-root');
@@ -74,14 +107,22 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 
   root.textContent = renderConnecting();
 
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  const iceServers = await fetchIceServers(base);
+  const pc = new RTCPeerConnection({ iceServers });
   console.log('[VIEWER-BOOT] RTCPeerConnection created');
 
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
-  const conn = new ViewerConnection(peerAdapter, socketAdapter);
-  console.log(`[VIEWER-BOOT] replaying ${String(buffered.length)} buffered post-pin-ok messages`);
-  for (const event of buffered) {
+  const conn = new ViewerConnection(peerAdapter, socketAdapter, { ipv4Only: isIpv4OnlyRequested() });
+  // CRITICAL ORDER: stop the pin-gate buffer listener BEFORE replaying.
+  // Replay uses ws.dispatchEvent, which fires EVERY listener — with the
+  // buffer listener still attached, each replayed event re-appends to the
+  // array being iterated and the loop feeds itself forever (observed as
+  // tens of thousands of duplicate offers in the local e2e harness).
+  buffered.stop();
+  const replay = buffered.events.splice(0);
+  console.log(`[VIEWER-BOOT] replaying ${String(replay.length)} buffered post-pin-ok messages`);
+  for (const event of replay) {
     ws.dispatchEvent(new MessageEvent('message', { data: event.data }));
   }
 
@@ -108,19 +149,26 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   });
 }
 
+/** Post-pin-ok message buffer: events captured while the caller sets up
+ *  ViewerConnection, plus stop() to detach the capture listener before the
+ *  caller replays them (see CRITICAL ORDER note at the call site). */
+interface PostPinBuffer {
+  readonly events: MessageEvent[];
+  stop(): void;
+}
+
 /**
  * Show the PIN entry form in root, let the user submit, and negotiate with the DO.
  * Returns buffered post-pin-ok messages on success (so the caller can replay them
  * into ViewerConnection before any new messages arrive), or null on failure.
  *
  * Race prevention: after pin-ok the DO immediately flushes buffered SDP/ICE onto
- * the same WebSocket. Those messages arrive as separate macro tasks, so they land
- * after the microtask queue drains (ViewerConnection setup). But to be safe we
- * buffer ALL non-pin messages that arrive after pin-ok and return them to the
- * caller so they can be replayed once ViewerConnection's handler is registered.
+ * the same WebSocket. The caller does async work (ICE config fetch) before
+ * ViewerConnection's handler is registered, so every non-pin message arriving
+ * after pin-ok is buffered here and replayed by the caller once setup is done.
  */
-async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise<MessageEvent[] | null> {
-  return new Promise<MessageEvent[] | null>((resolve) => {
+async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise<PostPinBuffer | null> {
+  return new Promise<PostPinBuffer | null>((resolve) => {
     root.innerHTML = renderPinEntry();
 
     function wireForm(): void {
@@ -154,12 +202,14 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
 
       if (control.type === 'pin-ok') {
         console.log('[VIEWER-BOOT] pin-ok received');
-        // Keep the listener active to buffer any messages that arrive before
-        // ViewerConnection registers its own handler.
-        // Swap to buffer-only mode: stop processing control messages.
+        // Swap to buffer-only mode: capture messages until the caller has
+        // ViewerConnection listening, then the caller calls stop() and
+        // replays. The named listener makes it detachable — an anonymous
+        // one here caused the infinite replay loop.
         ws.removeEventListener('message', onMessage);
-        ws.addEventListener('message', (e) => { postPinBuffer.push(e); });
-        resolve(postPinBuffer);
+        const capture = (e: MessageEvent): void => { postPinBuffer.push(e); };
+        ws.addEventListener('message', capture);
+        resolve({ events: postPinBuffer, stop: () => { ws.removeEventListener('message', capture); } });
       } else if (control.type === 'pin-failed') {
         const left = control.attemptsLeft ?? 0;
         console.log(`[VIEWER-BOOT] pin-failed attemptsLeft=${String(left)}`);
@@ -244,6 +294,12 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
     if (!listeningStreams.has(streamId)) {
       listeningStreams.add(streamId);
       conn.trackStream(streamId);
+      // The SW allocated this id — the mux must adopt it before writeFrame,
+      // which rejects unknown streams as 'not-open'.
+      const adopted = mux.adoptStream(streamId);
+      if (!adopted.ok) {
+        console.log(`[PAGE] adoptStream REJECTED sid=${String(streamId)} reason=${adopted.error.reason}`);
+      }
 
       const unsubscribe = mux.onInbound((frame) => {
         if (frame.streamId !== streamId) return;
@@ -263,17 +319,22 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
       });
     }
 
-    // Decode the encoded Beam frame bytes and write into the mux.
-    if (msg.data && msg.data.byteLength > 0) {
-      const frame = decodeFrame(msg.data);
-      if (isFrameDecodeError(frame)) {
-        console.log(`[PAGE] decodeFrame ERROR sid=${String(streamId)}`, frame);
-      } else {
-        console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)}`);
-        mux.writeFrame(frame);
-      }
-    }
+    writeRelayFrame(mux, streamId, msg.data);
   });
+}
+
+/** Decode SW-relayed frame bytes and write into the mux, logging rejections. */
+function writeRelayFrame(mux: StreamMultiplexer, streamId: number, data: Uint8Array | undefined): void {
+  if (!data || data.byteLength === 0) {
+    return;
+  }
+  const frame = decodeFrame(data);
+  if (isFrameDecodeError(frame)) {
+    console.log(`[PAGE] decodeFrame ERROR sid=${String(streamId)}`, frame);
+    return;
+  }
+  const written = mux.writeFrame(frame);
+  console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)} ok=${String(written.ok)}${written.ok ? '' : ` reason=${JSON.stringify(written.error)}`}`);
 }
 
 /**
@@ -294,6 +355,11 @@ function extractSessionCode(): string | null {
   }
 
   return null;
+}
+
+/** `?ipv4=1` — set by the CLI on the printed viewer URL when --ipv4-only is passed. */
+function isIpv4OnlyRequested(): boolean {
+  return new URLSearchParams(window.location.search).get('ipv4') === '1';
 }
 
 interface PinControl {

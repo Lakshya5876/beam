@@ -1,18 +1,47 @@
 {
-  "name": "beam",
+  "name": "@beamtunnel/cli",
   "version": "0.1.0",
-  "private": true,
-  "description": "Beam — localhost HTTP replay over peer-to-peer data channels. Governed by CLAUDE.md.",
+  "description": "Expose your localhost server to a browser peer over WebRTC. No cloud relay, near-zero cost.",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
+  "bin": {
+    "bm": "./dist/presentation/cli.js"
+  },
+  "exports": {
+    ".": "./dist/composition.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "SECURITY.md",
+    "LIMITATIONS.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "prepublishOnly": "npm run build && npm test && npm run lint",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
+  "keywords": [
+    "tunnel",
+    "localhost",
+    "webrtc",
+    "p2p",
+    "peer-to-peer",
+    "proxy",
+    "devtool"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/beamtunnel/beam.git"
+  },
+  "homepage": "https://github.com/beamtunnel/beam#readme",
   "dependencies": {
     "node-datachannel": "0.32.1"
   },

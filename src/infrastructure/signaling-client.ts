@@ -70,12 +70,16 @@ export class WebSocketSignalingClient implements SignalingClient {
   private socket: DcWebSocket | null = null;
   private state: ConnectionState = 'idle';
   private readonly handlers: Array<(message: SignalingMessage) => void> = [];
+  private readonly log: (msg: string) => void;
 
   constructor(
     private readonly baseUrl: string,
     private readonly connectTimeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS,
     private readonly maxInboundBytes: number = DEFAULT_MAX_INBOUND_BYTES,
-  ) {}
+    log?: (msg: string) => void,
+  ) {
+    this.log = log ?? ((): void => { /* noop */ });
+  }
 
   /** Pure URL construction. SessionCode is branded [a-z0-9]{26,} — URL-safe. */
   buildUrl(code: SessionCode): string {
@@ -89,7 +93,7 @@ export class WebSocketSignalingClient implements SignalingClient {
     }
     this.state = 'connecting';
     const url = this.buildUrl(code);
-    console.log(`[HOST-SIG] connect url=${url}`);
+    this.log(`[HOST-SIG] connect url=${url}`);
     return new Promise<Result<undefined, SignalingConnectError>>((resolve) => {
       this.openSocket(url, resolve);
     });
@@ -123,17 +127,17 @@ export class WebSocketSignalingClient implements SignalingClient {
 
   private wireSocket(socket: DcWebSocket, finish: (result: Result<undefined, SignalingConnectError>) => void): void {
     socket.onOpen(() => {
-      console.log('[HOST-SIG] WebSocket OPEN');
+      this.log('[HOST-SIG] WebSocket OPEN');
       this.state = 'open';
       finish(ok());
     });
     socket.onError((reason) => {
-      console.log(`[HOST-SIG] WebSocket ERROR: ${reason}`);
+      this.log(`[HOST-SIG] WebSocket ERROR: ${reason}`);
       this.state = 'closed';
       finish(err(connectFailed(reason)));
     });
     socket.onClosed(() => {
-      console.log('[HOST-SIG] WebSocket CLOSED');
+      this.log('[HOST-SIG] WebSocket CLOSED');
       this.state = 'closed';
     });
     socket.onMessage((raw) => {
@@ -144,15 +148,15 @@ export class WebSocketSignalingClient implements SignalingClient {
   private handleInbound(raw: string | Buffer | ArrayBuffer): void {
     const text = rawToText(raw);
     if (Buffer.byteLength(text, 'utf8') > this.maxInboundBytes) {
-      console.log(`[HOST-SIG] inbound DROPPED oversized len=${Buffer.byteLength(text, 'utf8')}`);
+      this.log(`[HOST-SIG] inbound DROPPED oversized len=${Buffer.byteLength(text, 'utf8')}`);
       return;
     }
     const message = parseSignalingMessage(text);
     if (!message) {
-      console.log(`[HOST-SIG] inbound DROPPED unparseable: ${text.slice(0, 80)}`);
+      this.log(`[HOST-SIG] inbound DROPPED unparseable: ${text.slice(0, 80)}`);
       return;
     }
-    console.log(`[HOST-SIG] inbound kind=${message.kind}`);
+    this.log(`[HOST-SIG] inbound kind=${message.kind}`);
     for (const handler of this.handlers) {
       handler(message);
     }
@@ -160,10 +164,10 @@ export class WebSocketSignalingClient implements SignalingClient {
 
   sendMessage(message: SignalingMessage): Promise<Result<undefined, SignalingNotConnectedError>> {
     if (this.state !== 'open' || !this.socket) {
-      console.log(`[HOST-SIG] sendMessage DROPPED (not connected) kind=${message.kind}`);
+      this.log(`[HOST-SIG] sendMessage DROPPED (not connected) kind=${message.kind}`);
       return Promise.resolve(err({ error: 'SignalingNotConnected' }));
     }
-    console.log(`[HOST-SIG] sending kind=${message.kind}`);
+    this.log(`[HOST-SIG] sending kind=${message.kind}`);
     try {
       this.socket.sendMessage(JSON.stringify({ kind: message.kind, payload: message.payload }));
     } catch {

@@ -11,6 +11,9 @@
  *   - Hop-by-hop and client-managed headers are stripped before send.
  *   - CR/LF in method, path, or any header name/value is rejected with a
  *     typed error BEFORE any socket write (no request splitting / smuggling).
+ *   - Path traversal segments (`..`, `%2e%2e`, mixed encoding) are rejected
+ *     before send — prevents `/../` and encoded-dot bypasses reaching the
+ *     local server when it serves static files.
  *   - replay() is total: it never throws or rejects; every failure resolves
  *     to a typed ReplayFailedError carrying no stack trace.
  */
@@ -46,7 +49,21 @@ const CLIENT_MANAGED_HEADERS: ReadonlySet<string> = new Set(['host', 'content-le
 type Resolve = (result: Result<ReplayResponse, ReplayFailedError>) => void;
 
 function containsControlChars(value: string): boolean {
-  return /[\r\n]/.test(value);
+  // Block CR, LF (request splitting) and NUL (path truncation on vulnerable servers).
+  return /[\r\n\0]/.test(value);
+}
+
+/**
+ * Detect path traversal patterns in the path-only portion of a request path
+ * (before the query string). Blocks `..` segments, percent-encoded double
+ * dots (`%2e%2e`, `.%2e`, `%2e.`), and encoded slashes (`%2f`) which could
+ * combine with dots to form traversal sequences across decode boundaries.
+ */
+function containsPathTraversal(rawPath: string): boolean {
+  const pathOnly = rawPath.split('?')[0] ?? rawPath;
+  if (/(?:^|\/)\.\.(?:\/|$)/.test(pathOnly)) return true;
+  if (/%2e%2e|%2e\.|\.%2e|%2f/i.test(pathOnly)) return true;
+  return false;
 }
 
 function fail(reason: string): ReplayFailedError {
@@ -99,6 +116,9 @@ export class LoopbackReplayClient implements ReplayClient {
     }
     if (containsControlChars(request.path)) {
       return err(fail('path contains control characters'));
+    }
+    if (containsPathTraversal(request.path)) {
+      return err(fail('path traversal not permitted'));
     }
     return this.sanitizeHeaders(request.headers);
   }

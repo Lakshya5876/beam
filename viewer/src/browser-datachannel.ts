@@ -20,7 +20,13 @@ export class BrowserDataChannelAdapter implements PeerTransport {
     if (this.dc.readyState === 'closed' || this.dc.readyState === 'closing') {
       return err({ error: 'TransportClosed' });
     }
-    this.dc.send(encodeFrame(frame));
+    // Copy into a fresh ArrayBuffer-backed view: encodeFrame's Uint8Array is
+    // typed over ArrayBufferLike, which dc.send's ArrayBufferView<ArrayBuffer>
+    // overload rejects under TS5.9 DOM types.
+    const bytes = encodeFrame(frame);
+    const copy = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+    copy.set(bytes);
+    this.dc.send(copy);
     return ok();
   }
 

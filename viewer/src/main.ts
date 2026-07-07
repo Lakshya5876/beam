@@ -45,7 +45,9 @@ if (root) {
     root.textContent = 'Internal error: shared protocol failed self-check.';
   } else {
     // S15b: bootstrap the viewer connection orchestration
-    const signalingBaseUrl = new URL(document.location.href).searchParams.get('signaling') || 'ws://localhost:8081';
+    // Fallback matches `wrangler dev` (local signaling worker) on its default
+    // port. Production viewers always arrive with ?signaling=<deployed-url>.
+    const signalingBaseUrl = new URL(document.location.href).searchParams.get('signaling') || 'ws://127.0.0.1:8787';
     bootstrap(signalingBaseUrl).catch((err) => {
       if (root) root.textContent = `Bootstrap failed: ${err instanceof Error ? err.message : String(err)}`;
     });

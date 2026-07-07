@@ -3,7 +3,9 @@
  * Service Worker entry point (S16 — impure boundary, verified live at S18).
  * Thin glue over sw-fetch-gate.ts and sw-bridge.ts pure modules.
  *
- * Path-based exclusion (N1): /__beam/* passes through — Beam's own bootstrap assets.
+ * Path-based exclusion (N1, see sw-fetch-gate.ts shouldBypassRelay): /,
+ * /assets/*, and /__beam/* pass through — the viewer's own shell, bundle,
+ * and bootstrap assets. Everything else same-origin is relayed.
  * Single-document/SPA apps only in v1 — see LIMITATIONS.md.
  */
 
@@ -14,10 +16,11 @@ import {
   enqueue,
   nextStreamId,
   onMuxReady,
+  shouldBypassRelay,
   trackStreamClose,
   RELAY_TIMEOUT_MS,
 } from './sw-fetch-gate.js';
-import { encodeFrame, decodeFrame, isFrameDecodeError } from './protocol-bridge.js';
+import { encodeFrame, decodeFrame, FrameType, isFrameDecodeError } from './protocol-bridge.js';
 import { encodeRequest } from './request-serializer.js';
 
 declare const self: ServiceWorkerGlobalScope;
@@ -61,6 +64,16 @@ function handleRelayResponse(streamId: number, frameBytes: Uint8Array): void {
   const frame = decodeFrame(frameBytes);
   if (isFrameDecodeError(frame)) return;
 
+  // ERROR frame (type 7): the host rejected or failed the request. Resolve
+  // the pending fetch with 502 instead of hanging it forever (the silent-hang
+  // variant was caught by the local e2e harness).
+  if (frame.type === FrameType.ERROR) {
+    const reason = new TextDecoder().decode(frame.payload) || 'relay error';
+    console.log(`[SW] ERROR frame sid=${String(streamId)} reason=${reason}`);
+    handleRelayError(streamId, reason);
+    return;
+  }
+
   let assembler = assemblers.get(streamId);
   if (!assembler) {
     assembler = new ResponseAssembler();
@@ -100,7 +113,7 @@ function handleRelayError(streamId: number, reason: string): void {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (url.pathname.startsWith('/__beam/')) return; // Beam bootstrap assets — pass through
+  if (shouldBypassRelay(url.pathname)) return; // Viewer's own shell/bundle/bootstrap assets — pass through
   if (url.origin !== self.location.origin) return;  // Cross-origin — pass through
   const streamId = nextStreamId(gate);
 
@@ -148,8 +161,9 @@ async function handleFetch(streamId: number, request: Request, clientId: string)
     const bodyBytes = request.body ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array(0);
     const reqUrl = new URL(request.url);
     const path = reqUrl.pathname + (reqUrl.search ?? '');
-    const headers: Array<[string, string]> = [];
-    request.headers.forEach((value, name) => { headers.push([name, value]); });
+    // Record shape — the host's decodeRequestHead contract (NOT array-of-pairs).
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, name) => { headers[name] = value; });
 
     const frames = encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
     postRelayFrames(source, streamId, frames);

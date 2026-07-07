@@ -4,6 +4,20 @@
 All deploy commands transmit code off-machine. Run them on a dedicated
 deploy machine or in CI.
 
+**Start here — the complete deploy artifact set lives in `docs/deploy/`:**
+
+| Artifact | Purpose |
+|----------|---------|
+| [docs/deploy/RELEASE_CHECKLIST.md](docs/deploy/RELEASE_CHECKLIST.md) | Order-of-operations for the whole release (infra → CLI defaults → live test gate → npm) |
+| [docs/deploy/CLOUDFLARE_SETUP.md](docs/deploy/CLOUDFLARE_SETUP.md) | Worker + Pages setup, DNS requirements, verification curls, first live E2E protocol |
+| [docs/deploy/ENVIRONMENT.md](docs/deploy/ENVIRONMENT.md) | Every configuration knob (host env/flags, worker vars, viewer inputs) |
+| [docs/deploy/NPM_PUBLISH.md](docs/deploy/NPM_PUBLISH.md) | npm publish checklist |
+| `scripts/preflight.sh` | Local mechanical readiness check (run before zipping) |
+| `scripts/deploy-signaling.sh`, `scripts/deploy-viewer.sh` | Guarded deploy scripts — refuse to run without `BEAM_DEPLOY_CONFIRM=yes` |
+
+The sections below remain as background; where they conflict with
+`docs/deploy/`, the `docs/deploy/` versions win.
+
 ---
 
 ## Prerequisites

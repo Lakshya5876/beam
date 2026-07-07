@@ -31,10 +31,33 @@ const PIN_VERIFIED_KEY = 'pin-verified';
 const PENDING_COUNT_KEY = 'pending-count';
 const PENDING_PREFIX = 'pending:';
 
-export class SessionDurableObject {
-  private readonly mintLimiter = new RateLimiter({ maxPerWindow: 30, windowMs: 60_000 });
+/** Deploy-time policy knobs (wrangler.jsonc vars); defaults preserved. */
+export interface SessionPolicyEnv {
+  /** Mint requests allowed per IP per minute (default 30). */
+  MINT_MAX_PER_MINUTE?: string;
+  /** PIN attempts before lockout (default 3). */
+  PIN_MAX_ATTEMPTS?: string;
+}
 
-  constructor(private readonly state: DurableObjectState) {}
+function policyInt(raw: string | undefined, fallback: number): number {
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+export class SessionDurableObject {
+  private readonly mintLimiter: RateLimiter;
+  private readonly pinMaxAttempts: number;
+
+  constructor(
+    private readonly state: DurableObjectState,
+    env: SessionPolicyEnv = {},
+  ) {
+    this.mintLimiter = new RateLimiter({
+      maxPerWindow: policyInt(env.MINT_MAX_PER_MINUTE, 30),
+      windowMs: 60_000,
+    });
+    this.pinMaxAttempts = policyInt(env.PIN_MAX_ATTEMPTS, PIN_MAX_ATTEMPTS);
+  }
 
   fetch(request: Request): Response | Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
@@ -138,7 +161,7 @@ export class SessionDurableObject {
 
   private async handlePinRegister(hash: string): Promise<void> {
     await this.state.storage.put(PIN_HASH_KEY, hash);
-    await this.state.storage.put(PIN_ATTEMPTS_KEY, PIN_MAX_ATTEMPTS);
+    await this.state.storage.put(PIN_ATTEMPTS_KEY, this.pinMaxAttempts);
   }
 
   private async handlePinVerify(ws: WebSocket, rawPin: string): Promise<void> {

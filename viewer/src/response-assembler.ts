@@ -4,8 +4,7 @@ export type AssemblerFeedResult = 'continue' | 'complete' | 'error';
 
 interface ResponseHeadPayload {
   status: number;
-  statusText: string;
-  headers: [string, string][];
+  headers: Record<string, string>;
 }
 
 type AssemblerState = 'idle' | 'head_received' | 'streaming' | 'complete' | 'errored';
@@ -51,13 +50,17 @@ export class ResponseAssembler {
    */
   buildResponse(): Response {
     if (!this.headPayload) throw new Error('buildResponse called before RESPONSE_HEAD');
-    const { status, statusText, headers } = this.headPayload;
+    const { status, headers } = this.headPayload;
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.controller = controller;
       },
     });
-    return new Response(stream, { status, statusText, headers });
+    // Null-body statuses reject a stream body in the Response constructor.
+    if (status === 204 || status === 205 || status === 304) {
+      return new Response(null, { status, headers });
+    }
+    return new Response(stream, { status, headers });
   }
 
   /**
@@ -71,15 +74,25 @@ export class ResponseAssembler {
   }
 }
 
+/**
+ * Host contract (relay-use-case encodeResponseHead): {status, headers} with
+ * headers as a string Record. The previous shape here ({status, statusText,
+ * headers: [string,string][]}) never matched what the host sends — every
+ * response head was rejected. Caught by the local e2e harness.
+ */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return Object.values(value).every((v) => typeof v === 'string');
+}
+
 function parseHead(payload: Uint8Array): ResponseHeadPayload | null {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(payload)) as unknown;
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const obj = parsed as { status?: unknown; statusText?: unknown; headers?: unknown };
-    if (typeof obj.status !== 'number') return null;
-    if (typeof obj.statusText !== 'string') return null;
-    if (!Array.isArray(obj.headers)) return null;
-    return { status: obj.status, statusText: obj.statusText, headers: obj.headers as [string, string][] };
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const obj = parsed as { status?: unknown; headers?: unknown };
+    if (typeof obj.status !== 'number' || !Number.isInteger(obj.status)) return null;
+    if (!isStringRecord(obj.headers)) return null;
+    return { status: obj.status, headers: obj.headers };
   } catch {
     return null;
   }

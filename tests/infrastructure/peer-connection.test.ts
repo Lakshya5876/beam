@@ -1,5 +1,5 @@
 import nodeDataChannel from 'node-datachannel';
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createFramePayload,
   createStreamId,
@@ -12,7 +12,11 @@ import {
   type Frame,
 } from '../../src/domain/frame.js';
 import {
+  candidateTypeOf,
   classifyConnectionFailure,
+  extractMdnsHost,
+  formatSelectedPair,
+  isIpv6Candidate,
   isPeerSignalingError,
   PeerConnectionTransport,
   type NativeDataChannel,
@@ -123,8 +127,14 @@ class FakePeerConnection implements NativePeerConnection {
   onLocalDescription(): void {
     /* not exercised by the deterministic suite */
   }
-  onLocalCandidate(): void {
-    /* not exercised by the deterministic suite */
+  onLocalCandidate(cb: (candidate: string, mid: string) => void): void {
+    this.localCandidateCbs.push(cb);
+  }
+  private localCandidateCbs: Array<(candidate: string, mid: string) => void> = [];
+  emitLocalCandidate(candidate: string, mid: string): void {
+    for (const cb of this.localCandidateCbs) {
+      cb(candidate, mid);
+    }
   }
   onStateChange(cb: (state: string) => void): void {
     this.stateCbs.push(cb);
@@ -329,6 +339,21 @@ describe('PeerConnectionTransport — honest-failure path', () => {
     }
   });
 
+  it('close() before connect cancels the timer and resolves awaitConnected immediately', async () => {
+    const fake = new FakePeerConnection();
+    const transport = offerTransport(fake, 60_000); // very long timeout — would hang without explicit cancel
+    transport.start();
+
+    // close() before channel opens
+    transport.close();
+
+    const result = await transport.awaitConnected();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.reason).toBe('closed-before-open');
+    }
+  });
+
   it('classifyConnectionFailure maps states to typed reasons', () => {
     expect(classifyConnectionFailure('failed')).toBe('no-viable-candidate');
     expect(classifyConnectionFailure('disconnected')).toBe('closed-before-open');
@@ -382,5 +407,136 @@ describe('PeerConnectionTransport — real node-datachannel (no ICE pairing)', (
     if (!result.ok) {
       expect(isPeerSignalingError(result.error)).toBe(true);
     }
+  });
+});
+
+// ---- mDNS candidate resolution (Chrome hides local IPs with UUID.local) ----
+
+const MDNS_CANDIDATE = 'candidate:12345678 1 udp 2113937151 ecc498da-5eba-41f1-870c-e7d9d7285d94.local 52256 typ host generation 0';
+const PLAIN_CANDIDATE = 'candidate:12345678 1 udp 2113937151 192.168.1.5 52256 typ host generation 0';
+
+describe('extractMdnsHost', () => {
+  it('extracts UUID.local hostname from a Chrome mDNS candidate', () => {
+    expect(extractMdnsHost(MDNS_CANDIDATE)).toBe('ecc498da-5eba-41f1-870c-e7d9d7285d94.local');
+  });
+
+  it('returns null for a plain-IP candidate', () => {
+    expect(extractMdnsHost(PLAIN_CANDIDATE)).toBeNull();
+  });
+
+  it('returns null for an empty string', () => {
+    expect(extractMdnsHost('')).toBeNull();
+  });
+});
+
+describe('PeerConnectionTransport mDNS resolution', () => {
+  it('mDNS candidate: resolves hostname before calling native addRemoteCandidate', async () => {
+    const fake = new FakePeerConnection();
+    const resolveMdns = vi.fn().mockResolvedValue('192.168.1.5');
+    const transport = new PeerConnectionTransport({ role: 'answer', factory: () => fake, resolveMdns });
+
+    transport.applyRemoteDescription('v=0\r\n', 'offer');
+    transport.addRemoteCandidate(MDNS_CANDIDATE, '0');
+
+    await Promise.resolve(); // flush microtask queue for the async resolution
+
+    expect(resolveMdns).toHaveBeenCalledWith('ecc498da-5eba-41f1-870c-e7d9d7285d94.local');
+    expect(fake.addedCandidates).toHaveLength(1);
+    expect(fake.addedCandidates[0]?.candidate).toContain('192.168.1.5');
+    expect(fake.addedCandidates[0]?.candidate).not.toContain('.local');
+  });
+
+  it('regular candidate bypasses the mDNS resolver and is passed immediately', () => {
+    const fake = new FakePeerConnection();
+    const resolveMdns = vi.fn();
+    const transport = new PeerConnectionTransport({ role: 'answer', factory: () => fake, resolveMdns });
+
+    transport.applyRemoteDescription('v=0\r\n', 'offer');
+    transport.addRemoteCandidate(PLAIN_CANDIDATE, '0');
+
+    expect(resolveMdns).not.toHaveBeenCalled();
+    expect(fake.addedCandidates).toHaveLength(1);
+    expect(fake.addedCandidates[0]?.candidate).toBe(PLAIN_CANDIDATE);
+  });
+
+  it('mDNS resolution failure skips the candidate without throwing', async () => {
+    const fake = new FakePeerConnection();
+    const resolveMdns = vi.fn().mockRejectedValue(new Error('ENOTFOUND'));
+    const transport = new PeerConnectionTransport({ role: 'answer', factory: () => fake, resolveMdns });
+
+    transport.applyRemoteDescription('v=0\r\n', 'offer');
+    transport.addRemoteCandidate(MDNS_CANDIDATE, '0');
+
+    await Promise.resolve();
+
+    expect(fake.addedCandidates).toHaveLength(0); // skipped, not crashed
+  });
+
+  it('buffered mDNS candidate is resolved after remote description is applied', async () => {
+    const fake = new FakePeerConnection();
+    const resolveMdns = vi.fn().mockResolvedValue('10.0.0.42');
+    const transport = new PeerConnectionTransport({ role: 'answer', factory: () => fake, resolveMdns });
+
+    // Add candidate BEFORE remote description (triggers buffering path)
+    transport.addRemoteCandidate(MDNS_CANDIDATE, '0');
+    expect(fake.addedCandidates).toHaveLength(0); // still buffered
+
+    transport.applyRemoteDescription('v=0\r\n', 'offer');
+    await Promise.resolve();
+
+    expect(resolveMdns).toHaveBeenCalledWith('ecc498da-5eba-41f1-870c-e7d9d7285d94.local');
+    expect(fake.addedCandidates[0]?.candidate).toContain('10.0.0.42');
+  });
+});
+
+describe('candidateTypeOf / formatSelectedPair — diagnostics', () => {
+  it('extracts the ICE candidate type', () => {
+    expect(candidateTypeOf('candidate:1 1 UDP 212 192.168.1.5 54400 typ host')).toBe('host');
+    expect(candidateTypeOf('candidate:2 1 UDP 168 203.0.113.9 54400 typ srflx raddr 0.0.0.0')).toBe('srflx');
+    expect(candidateTypeOf('candidate:4 1 UDP 41 198.51.100.4 3478 typ relay')).toBe('relay');
+    expect(candidateTypeOf('garbage')).toBeNull();
+  });
+
+  it('formats a direct path when neither side is relayed', () => {
+    expect(formatSelectedPair({ local: { type: 'srflx' }, remote: { type: 'host' } }))
+      .toBe('path=DIRECT local=srflx remote=host');
+  });
+
+  it('formats a TURN path when either side is relayed', () => {
+    expect(formatSelectedPair({ local: { type: 'relay' }, remote: { type: 'srflx' } }))
+      .toContain('path=RELAY (TURN)');
+  });
+
+  it('degrades to ? for missing endpoint info', () => {
+    expect(formatSelectedPair({})).toBe('path=DIRECT local=? remote=?');
+  });
+});
+
+describe('isIpv6Candidate / ipv4-only filtering', () => {
+  it('classifies candidate address family from the 5th field', () => {
+    expect(isIpv6Candidate('a=candidate:1 1 UDP 2114977791 192.168.1.21 61781 typ host')).toBe(false);
+    expect(isIpv6Candidate('a=candidate:2 1 UDP 2116026111 2401:4900:1cb5::a921 61781 typ host')).toBe(true);
+    expect(isIpv6Candidate('candidate:3 1 UDP 2116025855 fddd:dddd:1000:0:8755:19e9:31b5:143b 61781 typ host')).toBe(true);
+  });
+
+  it('ipv4Only drops remote IPv6 candidates before the native layer', () => {
+    const fake = new FakePeerConnection();
+    const transport = new PeerConnectionTransport({ role: 'offer', factory: () => fake, ipv4Only: true });
+    transport.applyRemoteDescription('v=0', 'answer');
+    const v6 = transport.addRemoteCandidate('candidate:2 1 UDP 211 2401:4900::1 599 typ host', '0');
+    const v4 = transport.addRemoteCandidate('candidate:1 1 UDP 211 192.168.1.21 599 typ host', '0');
+    expect(v6.ok).toBe(true);
+    expect(v4.ok).toBe(true);
+    expect(fake.addedCandidates).toEqual([{ candidate: 'candidate:1 1 UDP 211 192.168.1.21 599 typ host', mid: '0' }]);
+  });
+
+  it('ipv4Only suppresses local IPv6 candidates from signaling handlers', () => {
+    const fake = new FakePeerConnection();
+    const transport = new PeerConnectionTransport({ role: 'offer', factory: () => fake, ipv4Only: true });
+    const seen: string[] = [];
+    transport.onLocalCandidate((candidate) => seen.push(candidate));
+    fake.emitLocalCandidate('a=candidate:2 1 UDP 211 2401:4900::1 599 typ host', '0');
+    fake.emitLocalCandidate('a=candidate:1 1 UDP 211 192.168.1.21 599 typ host', '0');
+    expect(seen).toEqual(['a=candidate:1 1 UDP 211 192.168.1.21 599 typ host']);
   });
 });

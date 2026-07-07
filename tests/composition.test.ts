@@ -228,23 +228,30 @@ describe('SDP/ICE glue', () => {
     expect(signaling.sent[1]).toEqual({ kind: 'ice-candidate', payload: JSON.stringify({ candidate: 'candidate:1 udp', mid: '0' }) });
   });
 
-  it('routes an inbound candidate through the peer buffering addRemoteCandidate', () => {
+  // applyRemoteSignals defers peer calls to the event loop (setImmediate) to
+  // avoid native→native reentrancy from the signaling callback thread; tests
+  // flush one macrotask before asserting.
+  const flushImmediate = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  it('routes an inbound candidate through the peer buffering addRemoteCandidate', async () => {
     const peer = new FakeHostPeer();
     const signaling = new FakeSignalingClient();
     applyRemoteSignals(signaling, peer);
     signaling.emit({ kind: 'ice-candidate', payload: JSON.stringify({ candidate: 'cand-X', mid: '0' }) });
+    await flushImmediate();
     expect(peer.addedCandidates).toEqual([{ candidate: 'cand-X', mid: '0' }]);
   });
 
-  it('routes an inbound offer to applyRemoteDescription', () => {
+  it('routes an inbound offer to applyRemoteDescription', async () => {
     const peer = new FakeHostPeer();
     const signaling = new FakeSignalingClient();
     applyRemoteSignals(signaling, peer);
     signaling.emit({ kind: 'offer', payload: 'remote-sdp' });
+    await flushImmediate();
     expect(peer.appliedDescriptions).toEqual([{ sdp: 'remote-sdp', type: 'offer' }]);
   });
 
-  it('drops a malformed inbound candidate without calling addRemoteCandidate (no abort)', () => {
+  it('drops a malformed inbound candidate without calling addRemoteCandidate (no abort)', async () => {
     const peer = new FakeHostPeer();
     const signaling = new FakeSignalingClient();
     applyRemoteSignals(signaling, peer);
@@ -252,15 +259,17 @@ describe('SDP/ICE glue', () => {
     signaling.emit({ kind: 'ice-candidate', payload: 'not json' });
     // Missing candidate field — must be dropped.
     signaling.emit({ kind: 'ice-candidate', payload: JSON.stringify({ mid: '0' }) });
+    await flushImmediate();
     expect(peer.addedCandidates).toEqual([]);
   });
 
-  it('accepts a candidate whose sdpMid is null/absent (browser first m-line), defaulting mid to "0"', () => {
+  it('accepts a candidate whose sdpMid is null/absent (browser first m-line), defaulting mid to "0"', async () => {
     const peer = new FakeHostPeer();
     const signaling = new FakeSignalingClient();
     applyRemoteSignals(signaling, peer);
     // Browser can emit event.candidate.sdpMid === null for the first m-line.
     signaling.emit({ kind: 'ice-candidate', payload: JSON.stringify({ candidate: 'cand-no-mid' }) });
+    await flushImmediate();
     expect(peer.addedCandidates).toEqual([{ candidate: 'cand-no-mid', mid: '0' }]);
   });
 });

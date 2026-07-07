@@ -3,7 +3,7 @@
  * Pure HTML generation (no DOM mutations).
  */
 
-export function renderUnsupported(missing: string[]): string {
+export function renderUnsupported(missing: readonly string[]): string {
   return `Unsupported browser. Missing: ${missing.join(', ')}`;
 }
 

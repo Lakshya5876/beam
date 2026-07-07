@@ -1,6 +1,26 @@
 export const MAX_CONCURRENT_STREAMS = 32;
 export const RELAY_TIMEOUT_MS = 30_000;
 
+/**
+ * Paths that belong to the viewer's OWN static bundle, not the tunneled
+ * target — these must never be relayed.
+ *
+ * `/__beam/*` was already excluded (bootstrap assets). `/assets/*` (the
+ * vite-hashed JS bundle, see viewer/vite.config.ts) and `/` (the app shell,
+ * served by the static host) were NOT excluded — so once the service worker
+ * took control, reloading the page hung: the SW intercepted the request for
+ * its own JS bundle and root document, tried to relay them to a peer, and
+ * the reload never completed. Every reload after first connect was broken.
+ *
+ * Trade-off: a tunneled target whose OWN app also serves `/assets/*` will
+ * have that prefix shadowed by the viewer's bundle instead of relayed. Kept
+ * narrow (exact `/` and `/assets/` prefix only) to minimize that collision
+ * — documented in LIMITATIONS.md.
+ */
+export function shouldBypassRelay(pathname: string): boolean {
+  return pathname === '/' || pathname.startsWith('/assets/') || pathname.startsWith('/__beam/');
+}
+
 export interface PendingItem {
   streamId: number;
   resolve: (r: PendingResult) => void;
