@@ -1,0 +1,35 @@
+{
+  "_comment": "Identity-based debt baseline. covenantwin.py grandfathers these findings and blocks any NEW identity. Identity = (rule, fp). Committed team state \u2014 edited only via human-authored PR.",
+  "ratchet_mode": "identity",
+  "populated": true,
+  "generated_at": "2026-08-15T00:00:00Z",
+  "generated_from_sha": "82c2df01c952ae2c275d8cce93dde8e5d82077ad",
+  "summary": {
+    "lint_errors": 2,
+    "type_errors": 0,
+    "security_findings": 0,
+    "layer_violations": 0
+  },
+  "scanners": {
+    "lint_root": "eslint 10 (typescript-eslint recommended)",
+    "lint_signaling": "NO_SCANNER",
+    "lint_viewer": "NO_SCANNER",
+    "types": "tsc --noEmit / -p tsconfig*.json (all three packages)",
+    "security": "NO_SCANNER",
+    "complexity": "eslint complexity rule (root only, ceiling 10)"
+  },
+  "findings": {
+    "viewer/src/bootstrap.ts": [
+      {
+        "rule": "@typescript-eslint/no-unused-vars",
+        "line_hint": 79,
+        "fp": "2394c47e4d6258f2c8ae256d36d00db8b55cbfce406fea0c64682ea3465f389c"
+      },
+      {
+        "rule": "@typescript-eslint/no-unused-vars",
+        "line_hint": 336,
+        "fp": "7f285120922bd0989d70292ecf1792682aec94da680a79b771e8333ab8801204"
+      }
+    ]
+  }
+}

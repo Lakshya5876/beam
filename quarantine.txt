@@ -1,6 +1,12 @@
-# quarantine.txt — committed flaky-test quarantine (Guide §6.2 T2).
-# Flaky tests are listed here with a linked issue — never deleted, never
-# retried-until-green. /review prints the count and covered modules on every
-# run. A quarantined test covering a CORE_FILES module (CLAUDE.md §5) is a
-# HARD STOP. Format, one per line:
-#   tests/<layer>/<module>.test.ts::<test name>  <issue-url>
+# Quarantine — flaky tests, committed team state.
+#
+# Guide §6 T4: flaky tests are quarantined HERE with a linked issue —
+# never deleted, never retried-until-green inside the covenant. /review
+# prints the quarantine count and the modules it covers on every run
+# ("QUARANTINED: 3 tests covering money.py, auth.py"). A quarantined test
+# that covers a CORE_FILES module (see CLAUDE.md) is a HARD STOP, not a
+# deferral — that is the one test that would catch a core regression.
+#
+# Format: <package>/<test file>::<test name> | issue=<link> | since=<YYYY-MM-DD>
+#
+# (empty — no tests currently quarantined)

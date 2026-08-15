@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pre-push — protected branch guard + fingerprint receipt check (via covenant.sh)
+set -euo pipefail
+
+# Protected branches: exact names + release/* prefix. Matches covenant.sh / spec §2.5.4.
+PROTECTED_EXACT="main master develop production"
+# Color only on a real terminal — IDE-extension wrappers (non-TTY) would otherwise
+# render raw ANSI escapes as garbage and can freeze the editor output pane.
+if [ -t 2 ]; then
+    RED='\033[0;31m'; YELLOW='\033[1;33m'; RESET='\033[0m'
+else
+    RED=''; YELLOW=''; RESET=''
+fi
+
+while IFS=' ' read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    REMOTE_BRANCH="${REMOTE_REF##refs/heads/}"
+
+    # Block force pushes (refspec starts with +)
+    if [[ "$LOCAL_REF" == +* ]]; then
+        echo -e "${RED}PRE-PUSH BLOCK: Force push is forbidden.${RESET}" >&2
+        exit 1
+    fi
+
+    # Block any refspec that deletes the bypass audit trail
+    if echo "$LOCAL_REF $REMOTE_REF" | grep -qE ':refs/notes/bypasses'; then
+        echo -e "${RED}PRE-PUSH BLOCK: Tampering with the bypass audit trail is forbidden.${RESET}" >&2
+        exit 1
+    fi
+
+    # Block direct pushes to protected branches (exact + release/* prefix)
+    for protected in $PROTECTED_EXACT; do
+        if [ "$REMOTE_BRANCH" = "$protected" ]; then
+            echo -e "${RED}PRE-PUSH BLOCK: Direct push to protected branch '${protected}' is forbidden. Open a PR.${RESET}" >&2
+            exit 1
+        fi
+    done
+    if [[ "$REMOTE_BRANCH" == release/* ]]; then
+        echo -e "${RED}PRE-PUSH BLOCK: Direct push to protected branch '${REMOTE_BRANCH}' is forbidden. Open a PR.${RESET}" >&2
+        exit 1
+    fi
+
+    # Bypass clock enforcement (24h policy):
+    #   active bypass (< 24h)  → WARN and allow push (audit trail still intact)
+    #   expired bypass (≥ 24h) → BLOCK push until the issue is fixed or a new bypass is opened
+    if git notes --ref=refs/notes/bypasses show HEAD 2>/dev/null | grep -q "BYPASS"; then
+        BYPASS_DATE=$(git notes --ref=refs/notes/bypasses show HEAD 2>/dev/null | grep -oE 'date=[0-9]+' | head -1 | cut -d= -f2)
+        NOW_EPOCH=$(date +%s)
+        if [ -n "$BYPASS_DATE" ]; then
+            BYPASS_AGE=$(( NOW_EPOCH - BYPASS_DATE ))
+            if [ "$BYPASS_AGE" -gt 86400 ]; then
+                echo -e "${RED}PRE-PUSH BLOCK: Bypass deadline expired.${RESET}" >&2
+                echo "A covenant bypass was recorded $((BYPASS_AGE / 3600))h ago — the 24-hour resolution window has closed." >&2
+                echo "Fix the underlying issue and commit normally, OR open a new bypass window:" >&2
+                echo "    SKIP_COVENANT=1 git commit --allow-empty -m 'chore: extend bypass window — <reason>'" >&2
+                exit 1
+            else
+                REMAINING=$(( (86400 - BYPASS_AGE) / 3600 ))
+                echo -e "${YELLOW}⚠ Active bypass — pushing with audit note intact. Resolution deadline: ${REMAINING}h remaining.${RESET}" >&2
+            fi
+        fi
+    fi
+done
+
+# Run covenant.sh for push-time checks (fingerprint receipt verification + mechanical tests)
+COVENANT_TRIGGER=pre-push exec python "$(git rev-parse --git-dir)"/../.githooks/covenantwin.py covenant --trigger pre-push
