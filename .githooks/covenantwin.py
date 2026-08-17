@@ -41,7 +41,7 @@ GOVERNANCE = ('.githooks/covenantwin.py', '.githooks/pre-commit', '.githooks/pre
 # specific false-positive-prone shape.
 SECRET = re.compile(r'(api[_-]?key\s*[=:]|' + 'aws' + r'_access' + r'_key' + r'_id|BEGIN (?:RSA |EC )?PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{20,}|pk_live_[A-Za-z0-9]{20,})', re.I)
 _SECRET_EXCLUDE = re.compile(r'placeholder|example|REDACTED')
-SQL = re.compile(r'\b(SELECT|INSERT|UPDATE|DELETE)\b|cursor\.execute|psycopg2\.connect|JdbcTemplate|prepareStatement', re.I)
+SQL = re.compile(r'\bSELECT\b.*\bFROM\b|\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b|cursor\.execute|psycopg2\.connect|JdbcTemplate|prepareStatement', re.I)
 HTTP = re.compile(r'^(?:from|import)\s+(?:fastapi|flask|django\.http)|APIRouter|@(?:app\.|RestController|Controller|RequestMapping|GetMapping|PostMapping)', re.M)
 DOMAIN_FW = re.compile(r'^(?:from|import)\s+(?:sqlalchemy|django\.|peewee|tortoise|sqlmodel|pymongo|psycopg2|redis|boto3|requests|httpx|fastapi|flask|celery)|@(Entity|Table|RestController|Repository)\b|from\s+[\'\"](?:typeorm|@prisma/client|sequelize|mongoose|express|fastify)', re.M)
 # Matches a linter finding line shaped like "<path>:<line>[:<col>]: <RULE_CODE> ..."
