@@ -19,10 +19,11 @@ import { buildViewerSignalingUrl } from './viewer-url.js';
 import { BrowserPeerAdapter } from './browser-peer.js';
 import { BrowserWebSocketAdapter } from './browser-signaling.js';
 import { ViewerConnection } from './viewer-connection.js';
-import { renderConnecting, renderFailed, renderPinEntry, renderPinFailed, renderPinLocked, renderUnsupported } from './pages.js';
+import { renderConnectedShell, renderConnecting, renderFailed, renderPinEntry, renderPinFailed, renderPinLocked, renderUnsupported } from './pages.js';
 import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
+import { createWsBridge } from './ws-bridge.js';
 
 const FALLBACK_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 const ICE_CONFIG_TIMEOUT_MS = 3000;
@@ -76,8 +77,8 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 // console.log('[VIEWER-BOOT] registering SW /__beam/sw.js');
       await navigator.serviceWorker.register('/__beam/sw.js', { scope: '/', type: 'module' });
 // console.log('[VIEWER-BOOT] SW registered');
-    } catch (e) {
-// console.log('[VIEWER-BOOT] SW registration FAILED:', e);
+    } catch {
+// console.log('[VIEWER-BOOT] SW registration FAILED');
     }
   } else {
 // console.log('[VIEWER-BOOT] navigator.serviceWorker unavailable');
@@ -128,7 +129,18 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 
   conn.onconnectionstate((state) => {
     if (state === 'connected') {
-      root.textContent = 'Connected — ready to relay.';
+      // Embed the tunneled app in an iframe rather than navigating this
+      // document to it — a full navigation here would unload the
+      // RTCPeerConnection/SW registration living in this page (see
+      // renderConnectedShell doc). The iframe's own navigation to '/' is
+      // relayed by the SW (shouldBypassRelay treats destination==='iframe'
+      // as never-bypassed) even though '/' is reserved for THIS shell on a
+      // genuine top-level navigation.
+      root.innerHTML = renderConnectedShell();
+      const frame = root.querySelector<HTMLIFrameElement>('#beam-frame');
+      if (frame) {
+        frame.src = '/';
+      }
     } else if (state === 'failed') {
       root.textContent = renderFailed('peer connection failed');
     }
@@ -137,6 +149,10 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // B1: wire mux-ready AFTER data channel is open (not on SW claim)
   conn.onmux((mux) => {
     wireRelayBridge(mux, conn, sessionCode);
+    // Exposed for ws-shim.ts, which runs in the tunneled-app iframe and
+    // reaches this OUTER window directly (same-origin `window.parent`) since
+    // a service worker cannot intercept `new WebSocket()` the way it does fetch().
+    window.__beamWsBridge = createWsBridge(mux);
   });
 
   // N3: on transport close, emit relay-error for all open streams
@@ -176,12 +192,22 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
       const input = root.querySelector<HTMLInputElement>('#beam-pin');
       if (!form || !input) return;
 
+      // A touch "double-tap" (or a keyboard Enter racing a button tap) can
+      // fire TWO submit events. `{ once: true }` here meant the SECOND event
+      // had no listener to call preventDefault() on, so the browser did a
+      // REAL HTML form submission — a GET to this page's own URL using the
+      // form's own field as the query string, wiping out ?session=/?signaling=
+      // and reloading into "no session code". preventDefault() must run on
+      // EVERY submit event; only the SEND to the DO is guarded to happen once.
+      let sent = false;
       form.addEventListener('submit', (e) => {
         e.preventDefault();
+        if (sent) return;
+        sent = true;
         const raw = input.value.replace(/\s/g, '');
 // console.log(`[VIEWER-BOOT] submitting PIN (${String(raw.length)} chars)`);
         ws.send(JSON.stringify({ type: 'pin', value: raw }));
-      }, { once: true });
+      });
     }
 
     wireForm();
@@ -333,8 +359,8 @@ function writeRelayFrame(mux: StreamMultiplexer, streamId: number, data: Uint8Ar
 // console.log(`[PAGE] decodeFrame ERROR sid=${String(streamId)}`, frame);
     return;
   }
-  const written = mux.writeFrame(frame);
-// console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)} ok=${String(written.ok)}${written.ok ? '' : ` reason=${JSON.stringify(written.error)}`}`);
+  mux.writeFrame(frame);
+// console.log(`[PAGE] writeFrame sid=${String(streamId)} type=${String(frame.type)}`);
 }
 
 /**

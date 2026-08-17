@@ -11,6 +11,19 @@ export function renderConnecting(): string {
   return 'Browser supported — connecting…';
 }
 
+/**
+ * The connected shell: the tunneled app is embedded in an iframe rather than
+ * rendered directly into the top-level document. The RTCPeerConnection, the
+ * Service Worker registration, and the DataChannel mux all live in THIS
+ * outer document — a full-page navigation inside the iframe (client-side
+ * routed or genuine server-rendered) never unloads them, so it does not tear
+ * down the tunnel. The service worker relays the iframe's navigations too
+ * (see sw-fetch-gate.ts shouldBypassRelay's destination==='iframe' case).
+ */
+export function renderConnectedShell(): string {
+  return `<iframe id="beam-frame" title="Tunneled application" style="position:fixed;inset:0;width:100%;height:100%;border:0;"></iframe>`;
+}
+
 export function renderFailed(reason: string): string {
   return `Connection failed: ${reason}`;
 }

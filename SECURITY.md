@@ -27,6 +27,20 @@ The viewer submits its guess through the same signaling channel. Three incorrect
 
 The hash is never written to disk, logged, or returned in error messages.
 
+**No signaling relayed before verification, in either direction.** The
+Durable Object holds back ALL SDP/ICE traffic — not just the host's offer —
+until the PIN is verified; an unverified connection cannot see or inject any
+WebRTC signaling. The "viewer" role slot itself is claimed the instant a
+second WebSocket connects (before any PIN check), so an attacker who has only
+the shareable link — no PIN — could otherwise occupy that sole slot
+indefinitely and permanently deny the real viewer (assignRole rejects a third
+connection as session-full). Two mitigations close this: the relay gate above
+means squatting the slot gains nothing, and a DO alarm evicts an unverified
+viewer socket after 2 minutes, bounding how long the denial-of-service can
+last. Verified live: an attacker holding the slot with no PIN attempt
+receives zero signaling messages, a genuine second viewer is rejected while
+the attacker squats, and the slot frees automatically ~2 minutes later.
+
 ### Session code
 
 The session code is a 26-character alphanumeric string minted by the signaling Durable Object. It serves as a session identifier, not an authenticator — the PIN is the authenticator.
@@ -81,6 +95,12 @@ Viewer-supplied `host` and `content-length` headers are always discarded and rep
 | Request body | 16 MiB | Multiplexer accumulates; relay use-case rejects on exceed |
 | Concurrent streams | 256 | Multiplexer tracks open streams; excess yields ERROR frame |
 | Total buffer | 16 MiB | Multiplexer triggers backpressure (pause / drain cycle) |
+| Single WS message | 1 MiB (per-stream buffer cap) | Same multiplexer cap, released after each message (not held for the connection's lifetime) so a long-lived WS connection can't accumulate unbounded buffered-byte accounting across many small messages while still bounding any one message |
+
+WebSocket relay reuses the same loopback confinement as HTTP relay (host
+always connects to `127.0.0.1:<port>`; the path is validated for control
+characters and traversal patterns with the identical guards before any socket
+opens) and honors `--allowed-paths` the same way.
 
 ---
 

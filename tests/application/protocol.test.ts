@@ -301,6 +301,52 @@ describe('buffer caps', () => {
   });
 });
 
+describe('WS_MESSAGE_END releases buffer without closing the stream (a long-lived WS connection)', () => {
+  it('many small messages over time never trip the per-stream buffer cap, unlike one big HTTP body would', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport, tinyLimits({ maxStreamBufferBytes: 10, maxTotalBufferBytes: 10 }));
+    // Each message is under the cap; WS_MESSAGE_END must release its bytes so
+    // the NEXT message starts from zero — otherwise a healthy, long-lived WS
+    // connection would eventually trip the cap on cumulative traffic alone.
+    for (let i = 0; i < 50; i += 1) {
+      const head = mux.acceptInbound(frame(FrameType.WS_MESSAGE_HEAD, 9, 1));
+      expect(head.ok).toBe(true);
+      const chunk = mux.acceptInbound(frame(FrameType.WS_MESSAGE_CHUNK, 9, 6));
+      expect(chunk.ok).toBe(true);
+      const end = mux.acceptInbound(frame(FrameType.WS_MESSAGE_END, 9, 0));
+      expect(end.ok).toBe(true);
+    }
+    expect(mux.openCount()).toBe(1); // still open — WS_MESSAGE_END is not a half-close
+    expect(transport.errorFrames()).toHaveLength(0);
+  });
+
+  it('a SINGLE message exceeding the per-stream cap is still rejected (the cap bounds one message, not the connection)', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport, tinyLimits({ maxStreamBufferBytes: 10 }));
+    expect(mux.acceptInbound(frame(FrameType.WS_MESSAGE_HEAD, 9, 1)).ok).toBe(true);
+    expect(mux.acceptInbound(frame(FrameType.WS_MESSAGE_CHUNK, 9, 6)).ok).toBe(true);
+    const overflow = mux.acceptInbound(frame(FrameType.WS_MESSAGE_CHUNK, 9, 6));
+    expect(overflow.ok).toBe(false);
+    if (!overflow.ok) {
+      expect(overflow.error.reason).toBe('stream-buffer-cap');
+    }
+  });
+
+  it('WS_CLOSE closes its half like REQUEST_END/RESPONSE_END — both directions closing fully retires the stream', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    expect(mux.acceptInbound(frame(FrameType.WS_CONNECT, 9, 4)).ok).toBe(true);
+    expect(mux.openCount()).toBe(1);
+    // Inbound WS_CLOSE alone only closes the INBOUND half — same half-close
+    // model as REQUEST_END/RESPONSE_END: the stream stays "open" until the
+    // OTHER half closes too (here, this side sending its own WS_CLOSE).
+    expect(mux.acceptInbound(frame(FrameType.WS_CLOSE, 9, 4)).ok).toBe(true);
+    expect(mux.openCount()).toBe(1);
+    expect(mux.writeFrame(frame(FrameType.WS_CLOSE, 9, 4)).ok).toBe(true);
+    expect(mux.openCount()).toBe(0);
+  });
+});
+
 describe('backpressure hysteresis (high/low-water gap)', () => {
   it('over-high pauses, drained-to-between STAYS paused, below-low resumes', () => {
     const transport = new FakeTransport();

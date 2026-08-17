@@ -16,6 +16,17 @@ export const FrameType = {
   ERROR: 7,
   PING: 8,
   PONG: 9,
+  // WebSocket relay (a service worker cannot intercept `new WebSocket()` —
+  // see viewer/src/ws-shim.ts — so a WS connection gets its own stream id
+  // from the SAME id space as HTTP streams, framed with its own head/body/end
+  // triad per message so message boundaries survive MAX_PAYLOAD_SIZE chunking).
+  WS_CONNECT: 10, // viewer -> host: JSON {path, protocols}
+  WS_ACCEPT: 11, // host -> viewer: JSON {protocol}
+  WS_REJECT: 12, // host -> viewer: UTF-8 reason string
+  WS_MESSAGE_HEAD: 13, // either direction: 1-byte isBinary flag; starts one WS message
+  WS_MESSAGE_CHUNK: 14, // either direction: raw message bytes, 0+ occurrences
+  WS_MESSAGE_END: 15, // either direction: empty; completes the message (stream stays open)
+  WS_CLOSE: 16, // either direction: JSON {code, reason}; closes this half (see protocol.ts isEndFrame)
 } as const;
 
 export type FrameType = (typeof FrameType)[keyof typeof FrameType];

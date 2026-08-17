@@ -16,6 +16,15 @@
  *     local server when it serves static files.
  *   - replay() is total: it never throws or rejects; every failure resolves
  *     to a typed ReplayFailedError carrying no stack trace.
+ *
+ * Streaming: response bytes are handed to the ReplaySink as they arrive from
+ * the upstream socket (res 'data' events), not buffered to 'end' first — the
+ * previous buffer-then-relay design stalled forever on a response that never
+ * ends (SSE, long-polling) and held arbitrarily large bodies in host memory.
+ * Each res 'data' event pauses the IncomingMessage and awaits the sink before
+ * resuming, so downstream backpressure (the DataChannel mux's high-water
+ * mark, threaded through the sink by the caller) throttles the upstream
+ * socket via ordinary Node stream flow control instead of an unbounded queue.
  */
 
 import http from 'node:http';
@@ -26,11 +35,10 @@ import {
   type ReplayClient,
   type ReplayFailedError,
   type ReplayRequest,
-  type ReplayResponse,
+  type ReplaySink,
   type Result,
 } from '../domain/interfaces.js';
-
-const LOOPBACK_HOST = '127.0.0.1';
+import { containsControlChars, containsPathTraversal, LOOPBACK_HOST } from './loopback-validation.js';
 
 const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
   'connection',
@@ -46,25 +54,7 @@ const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
 // Headers the client owns; a viewer-supplied value is never honored.
 const CLIENT_MANAGED_HEADERS: ReadonlySet<string> = new Set(['host', 'content-length']);
 
-type Resolve = (result: Result<ReplayResponse, ReplayFailedError>) => void;
-
-function containsControlChars(value: string): boolean {
-  // Block CR, LF (request splitting) and NUL (path truncation on vulnerable servers).
-  return /[\r\n\0]/.test(value);
-}
-
-/**
- * Detect path traversal patterns in the path-only portion of a request path
- * (before the query string). Blocks `..` segments, percent-encoded double
- * dots (`%2e%2e`, `.%2e`, `%2e.`), and encoded slashes (`%2f`) which could
- * combine with dots to form traversal sequences across decode boundaries.
- */
-function containsPathTraversal(rawPath: string): boolean {
-  const pathOnly = rawPath.split('?')[0] ?? rawPath;
-  if (/(?:^|\/)\.\.(?:\/|$)/.test(pathOnly)) return true;
-  if (/%2e%2e|%2e\.|\.%2e|%2f/i.test(pathOnly)) return true;
-  return false;
-}
+type Resolve = (result: Result<undefined, ReplayFailedError>) => void;
 
 function fail(reason: string): ReplayFailedError {
   return { error: 'ReplayFailed', reason };
@@ -87,27 +77,18 @@ function flattenHeaders(headers: IncomingHttpHeaders): Record<string, string> {
   return out;
 }
 
-function toResponse(res: IncomingMessage, chunks: Buffer[]): ReplayResponse {
-  const body = Buffer.concat(chunks);
-  return {
-    status: res.statusCode ?? 0,
-    headers: flattenHeaders(res.headers),
-    body: new Uint8Array(body),
-  };
-}
-
 export class LoopbackReplayClient implements ReplayClient {
   constructor(
     private readonly port: number,
     private readonly timeoutMs = 30_000,
   ) {}
 
-  replay(request: ReplayRequest): Promise<Result<ReplayResponse, ReplayFailedError>> {
+  replay(request: ReplayRequest, sink: ReplaySink): Promise<Result<undefined, ReplayFailedError>> {
     const headers = this.validate(request);
     if (!headers.ok) {
       return Promise.resolve(headers);
     }
-    return this.send(request, headers.value);
+    return this.send(request, headers.value, sink);
   }
 
   private validate(request: ReplayRequest): Result<Record<string, string>, ReplayFailedError> {
@@ -146,19 +127,19 @@ export class LoopbackReplayClient implements ReplayClient {
     };
   }
 
-  private send(request: ReplayRequest, headers: Record<string, string>): Promise<Result<ReplayResponse, ReplayFailedError>> {
+  private send(request: ReplayRequest, headers: Record<string, string>, sink: ReplaySink): Promise<Result<undefined, ReplayFailedError>> {
     // The executor wraps node:http so any synchronous throw surfaces as a
     // typed ReplayFailedError (totality), never as a rejected promise.
-    return new Promise<Result<ReplayResponse, ReplayFailedError>>((resolve) => {
+    return new Promise<Result<undefined, ReplayFailedError>>((resolve) => {
       try {
-        this.dispatch(request, headers, resolve);
+        this.dispatch(request, headers, sink, resolve);
       } catch (error) {
         resolve(err(fail(safeReason(error))));
       }
     });
   }
 
-  private dispatch(request: ReplayRequest, headers: Record<string, string>, resolve: Resolve): void {
+  private dispatch(request: ReplayRequest, headers: Record<string, string>, sink: ReplaySink, resolve: Resolve): void {
     const req = http.request(
       {
         host: LOOPBACK_HOST,
@@ -169,7 +150,7 @@ export class LoopbackReplayClient implements ReplayClient {
         timeout: this.timeoutMs,
       },
       (res) => {
-        collect(res, resolve);
+        void streamResponse(res, sink, resolve);
       },
     );
     req.on('error', (error) => {
@@ -183,15 +164,58 @@ export class LoopbackReplayClient implements ReplayClient {
   }
 }
 
-function collect(res: IncomingMessage, resolve: Resolve): void {
-  const chunks: Buffer[] = [];
+/**
+ * Stream the upstream response into `sink` one 'data' event at a time,
+ * pausing the socket and awaiting the sink before resuming — the standard
+ * Node backpressure idiom, so a congested downstream mux throttles the
+ * upstream socket via TCP flow control instead of buffering in this process.
+ */
+async function streamResponse(res: IncomingMessage, sink: ReplaySink, resolve: Resolve): Promise<void> {
+  let settled = false;
+  const finish = (result: Result<undefined, ReplayFailedError>): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    resolve(result);
+  };
+
+  try {
+    await sink.onHead({ status: res.statusCode ?? 0, headers: flattenHeaders(res.headers) });
+  } catch (error) {
+    finish(err(fail(safeReason(error))));
+    res.destroy();
+    return;
+  }
+
   res.on('data', (chunk: Buffer) => {
-    chunks.push(chunk);
+    if (settled) {
+      return;
+    }
+    res.pause();
+    void (async (): Promise<void> => {
+      try {
+        await sink.onChunk(new Uint8Array(chunk));
+        if (!settled) {
+          res.resume();
+        }
+      } catch (error) {
+        finish(err(fail(safeReason(error))));
+        res.destroy();
+      }
+    })();
   });
   res.on('end', () => {
-    resolve(ok(toResponse(res, chunks)));
+    void (async (): Promise<void> => {
+      try {
+        await sink.onEnd();
+      } catch {
+        // Best-effort: the response already fully arrived, nothing to abort.
+      }
+      finish(ok(undefined));
+    })();
   });
   res.on('error', (error) => {
-    resolve(err(fail(safeReason(error))));
+    finish(err(fail(safeReason(error))));
   });
 }

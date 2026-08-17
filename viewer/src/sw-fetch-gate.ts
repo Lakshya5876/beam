@@ -16,8 +16,19 @@ export const RELAY_TIMEOUT_MS = 30_000;
  * have that prefix shadowed by the viewer's bundle instead of relayed. Kept
  * narrow (exact `/` and `/assets/` prefix only) to minimize that collision
  * — documented in LIMITATIONS.md.
+ *
+ * iframe-shell (see bootstrap.ts renderConnectedShell): once connected, the
+ * OUTER document embeds the tunneled app inside `<iframe id="beam-frame">`
+ * so a full page navigation there never tears down the RTCPeerConnection
+ * living in the outer document. That iframe's OWN navigation requests carry
+ * `destination === 'iframe'` and MUST be relayed even to `/` — that `/` is
+ * the tunneled app's actual root, not the viewer shell's. Only a genuine
+ * top-level `document` navigation (the outer shell reloading) bypasses `/`.
  */
-export function shouldBypassRelay(pathname: string): boolean {
+export function shouldBypassRelay(pathname: string, destination: string): boolean {
+  if (destination === 'iframe') {
+    return false;
+  }
   return pathname === '/' || pathname.startsWith('/assets/') || pathname.startsWith('/__beam/');
 }
 

@@ -12,6 +12,7 @@
 import { parseArgs } from 'node:util';
 import { randomInt, createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 import { composeHost, type HostOptions, type HostRuntime } from '../composition.js';
 import { loadConfig, type BeamConfig } from '../config.js';
 import { createTimestampedLogger, describeSessionEvent } from './debug-log.js';
@@ -343,8 +344,15 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO(), env:
   return 0;
 }
 
-// Entry point: only run when this module is the entry point.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Entry point: only run when this module is the entry point. Comparing
+// import.meta.url against a manually-concatenated `file://${argv[1]}` breaks
+// on Windows — process.argv[1] is a raw Windows path (D:\a\b.js), not a
+// properly encoded file URL (file:///D:/a/b.js), so they never matched and
+// run() silently never fired for ANY direct Windows invocation (the real
+// published `bm` binary included) — the process loaded and exited doing
+// nothing, no error, no output. pathToFileURL() does the OS-correct
+// conversion (drive letter, backslash-to-slash, encoding) on every platform.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   run(process.argv.slice(2))
     .then((code) => {
       if (code !== 0) {

@@ -1,8 +1,8 @@
 # Cloudflare Setup — Signaling Worker + Viewer Pages
 
 Complete, mechanical setup instructions. Run everything in this document on
-the **deploy machine only** — never on the governed dev laptop (Architecture Guidelines §3
-LOCAL-ONLY). Every command is idempotent; re-running is safe.
+the **deploy machine only** — never on the dev laptop (LOCAL-ONLY). Every
+command is idempotent; re-running is safe.
 
 ## 0. Prerequisites
 

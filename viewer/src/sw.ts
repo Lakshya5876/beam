@@ -113,7 +113,7 @@ function handleRelayError(streamId: number, reason: string): void {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (shouldBypassRelay(url.pathname)) return; // Viewer's own shell/bundle/bootstrap assets — pass through
+  if (shouldBypassRelay(url.pathname, event.request.destination)) return; // Viewer's own shell/bundle/bootstrap assets — pass through (never the iframe's own navigations, see shouldBypassRelay)
   if (url.origin !== self.location.origin) return;  // Cross-origin — pass through
   const streamId = nextStreamId(gate);
 

@@ -171,22 +171,31 @@ describe('sw-fetch-gate', () => {
 });
 
 describe('shouldBypassRelay — viewer own-asset exclusion', () => {
-  it('bypasses the app shell root', () => {
-    expect(shouldBypassRelay('/')).toBe(true);
+  it('bypasses the app shell root on a top-level document navigation', () => {
+    expect(shouldBypassRelay('/', 'document')).toBe(true);
   });
 
   it('bypasses the vite-hashed asset bundle', () => {
-    expect(shouldBypassRelay('/assets/main-abc123.js')).toBe(true);
-    expect(shouldBypassRelay('/assets/sw-bridge-xyz.js')).toBe(true);
+    expect(shouldBypassRelay('/assets/main-abc123.js', 'script')).toBe(true);
+    expect(shouldBypassRelay('/assets/sw-bridge-xyz.js', 'script')).toBe(true);
   });
 
   it('bypasses Beam bootstrap assets under /__beam/', () => {
-    expect(shouldBypassRelay('/__beam/sw.js')).toBe(true);
+    expect(shouldBypassRelay('/__beam/sw.js', 'script')).toBe(true);
   });
 
   it('relays everything else — the tunneled target paths', () => {
-    expect(shouldBypassRelay('/api/users')).toBe(false);
-    expect(shouldBypassRelay('/smoke-test')).toBe(false);
-    expect(shouldBypassRelay('/index.html')).toBe(false);
+    expect(shouldBypassRelay('/api/users', '')).toBe(false);
+    expect(shouldBypassRelay('/smoke-test', '')).toBe(false);
+    expect(shouldBypassRelay('/index.html', '')).toBe(false);
+  });
+
+  it('relays the shell iframe\'s own root navigation — "/" there is the TUNNELED app, not the viewer shell', () => {
+    expect(shouldBypassRelay('/', 'iframe')).toBe(false);
+  });
+
+  it('relays the shell iframe navigating to any other path too', () => {
+    expect(shouldBypassRelay('/dashboard', 'iframe')).toBe(false);
+    expect(shouldBypassRelay('/assets/app.js', 'iframe')).toBe(false);
   });
 });

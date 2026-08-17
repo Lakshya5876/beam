@@ -20,7 +20,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc --project tsconfig.build.json",
     "prepublishOnly": "npm run build && npm test && npm run lint",
     "test": "vitest run",
     "coverage": "vitest run --coverage",

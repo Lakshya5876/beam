@@ -34,7 +34,8 @@ Your local server
 1. `bm` connects to the signaling server, mints a session code, and prints the viewer URL.
 2. The viewer opens the URL, enters the code. The DO verifies the PIN (SHA-256 hash comparison) and relays the WebRTC offer/answer.
 3. ICE negotiation completes; a direct DataChannel opens — no relay traffic touches the signaling server after this point.
-4. Every browser fetch goes through a service worker, serialised into Beam frames, sent over the DataChannel, replayed to `127.0.0.1`, and the response streamed back.
+4. The viewer shell embeds your app in an iframe and points it at your app's real root page. A service worker intercepts every fetch the iframe (or your app's own JS) makes, serialises it into Beam frames, sends it over the DataChannel, replays it to `127.0.0.1`, and streams the response back — so full page navigations inside your app work normally, without ever tearing down the tunnel.
+5. `new WebSocket(...)` calls in your app are relayed too: an injected script replaces `WebSocket` inside the iframe (a service worker cannot intercept the WebSocket constructor the way it intercepts `fetch()`), routing frames over the same DataChannel to a real WebSocket the host dials against your local server.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full design walkthrough.
 
@@ -126,9 +127,10 @@ bm 3000 --ipv4-only
 ## Security model
 
 - **Authentication**: every session requires a 6-digit PIN. The host generates it locally (CSPRNG); only its SHA-256 hash is registered with the signaling server. A brute-force attempt against a 6-digit PIN succeeds with probability < 0.003 % on the first try.
-- **Path restriction**: use `--allowed-paths` to limit exposure. Without it, every route on the target port is reachable by anyone who holds the link and code.
+- **No signaling before verification**: the signaling Durable Object relays nothing — in either direction — until the PIN is verified. Holding the link alone is not enough to see or inject any WebRTC signaling. An unverified second connection to a session (someone who has the link but not the PIN) is evicted automatically after 2 minutes so it cannot permanently occupy the session and lock out the real viewer.
+- **Path restriction**: use `--allowed-paths` to limit exposure — it also gates WebSocket connections, not just HTTP. Without it, every route on the target port is reachable by anyone who holds the link and code.
 - **No relay after connection**: once the WebRTC data channel is open, no traffic transits the signaling server. Cloudflare Workers cannot read your data.
-- **Loopback confinement**: the host always connects to `127.0.0.1:<port>`. Viewer-supplied headers cannot redirect requests to other hosts or ports.
+- **Loopback confinement**: the host always connects to `127.0.0.1:<port>`, for both HTTP and WebSocket relay. Viewer-supplied headers cannot redirect requests to other hosts or ports.
 - **Injection guards**: CR/LF in method, path, or any header value is rejected before any socket write. Path traversal segments (`..`, `%2e%2e`) are blocked.
 
 See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
@@ -137,10 +139,10 @@ See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
 
 ## Limitations
 
-- **SPA / client-side routing only** — top-level navigations reload the page and drop the connection. Server-side rendered apps with full page navigations are not supported in v1.
-- **No TURN relay** — ~10–15 % failure rate on symmetric NAT (corporate networks, some mobile carriers).
-- **No WebSocket proxying** — WebSocket upgrade requests are not intercepted.
-- **Chrome recommended** — the viewer service worker is tested in Chrome. Firefox and Safari have known SW + WebRTC compatibility gaps.
+- **No TURN relay** — direct peer-to-peer only. Connections fail on symmetric NAT and some CGNAT setups (common on corporate networks and certain mobile/home ISPs) with no fallback. This is the biggest reliability gap for "just works for anyone" — see LIMITATIONS.md.
+- **WebSocket relay has caveats** — supported (HMR, chat, realtime apps all work), but the browser's `WebSocket` API doesn't expose cookies as headers, so the loopback WS handshake doesn't carry the browser's cookies. Apps that gate a WS connection on cookie session auth won't authenticate over the relay.
+- **HTML shim injection is skipped for compressed responses** — a `Content-Encoding: gzip/br/deflate` HTML response is relayed byte-for-byte unmodified (correctly), but without the WebSocket shim, so `new WebSocket()` calls on that page won't be relayed.
+- **Chrome recommended** — the viewer's service worker + WebRTC combination is verified in Chromium-based browsers. Firefox and Safari have known SW/WebRTC compatibility gaps that are not independently verified here.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full details.
 
@@ -150,7 +152,7 @@ See [LIMITATIONS.md](LIMITATIONS.md) for full details.
 
 ```bash
 npm ci
-npx vitest run          # 238 tests, ~1s
+npx vitest run          # ~1s (run in signaling/ and viewer/ too — 3 independent packages)
 npm run lint            # eslint
 npm run typecheck       # tsc --noEmit
 npm run build           # dist/ for publishing

@@ -1,5 +1,5 @@
 /**
- * The four seam interfaces (design doc §A.6.1, CLAUDE.md §1 Domain).
+ * The four seam interfaces (design doc §A.6.1).
  * Everything here is typed in domain terms only — no WebRTC, WebSocket,
  * Node http, or platform types cross these boundaries. Infrastructure
  * implements these; application orchestrates against them; composition.ts
@@ -85,10 +85,38 @@ export interface ReplayRequest {
   readonly body: Uint8Array;
 }
 
+/** A complete, buffered response — still used for synthetic responses (e.g. the 403 the path-authorization layer builds) that never touch a real upstream. */
 export interface ReplayResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: Uint8Array;
+}
+
+export interface ReplayResponseHead {
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+/**
+ * Streaming sink for a replayed response: onHead fires once, then onChunk
+ * fires zero or more times with body bytes IN ORDER, then onEnd fires once —
+ * mirroring the wire's RESPONSE_HEAD / RESPONSE_BODY_CHUNK* / RESPONSE_END
+ * sequence so the caller can frame and forward bytes as they arrive instead
+ * of buffering the full body first. Required for SSE, long-lived responses,
+ * and large downloads — buffering the whole body before relaying anything
+ * both stalls forever on a response that never ends and holds arbitrarily
+ * large bodies in host memory.
+ *
+ * Each method may return a Promise; a ReplayClient implementation MUST await
+ * it before pulling more bytes from the upstream connection — this is the
+ * mechanism by which outbound-transport backpressure (the DataChannel mux's
+ * high-water mark) propagates back to the loopback socket, so a slow viewer
+ * cannot make the host buffer an unbounded amount of a large response.
+ */
+export interface ReplaySink {
+  onHead(head: ReplayResponseHead): void | Promise<void>;
+  onChunk(chunk: Uint8Array): void | Promise<void>;
+  onEnd(): void | Promise<void>;
 }
 
 export interface ReplayFailedError {
@@ -96,9 +124,15 @@ export interface ReplayFailedError {
   readonly reason: string;
 }
 
-/** Replays a viewer request against the developer's localhost app. */
+/**
+ * Replays a viewer request against the developer's localhost app, streaming
+ * the response through `sink`. Resolves ok() once onEnd has completed, or
+ * err() on failure. A failure reported AFTER onHead has already fired is a
+ * MID-STREAM abort (the response was already partially delivered) — callers
+ * must not treat it as a fresh, headless failure.
+ */
 export interface ReplayClient {
-  replay(request: ReplayRequest): Promise<Result<ReplayResponse, ReplayFailedError>>;
+  replay(request: ReplayRequest, sink: ReplaySink): Promise<Result<undefined, ReplayFailedError>>;
 }
 
 /** One replayed request, as rendered by the diagnostics surface (design §7). */
@@ -116,4 +150,33 @@ export interface RequestLogRepository {
   persistRecord(record: RequestRecord): Promise<void>;
   fetchRecent(limit: number): Promise<readonly RequestRecord[]>;
   findByStreamId(streamId: StreamId): Promise<readonly RequestRecord[]>;
+}
+
+export interface WsConnectRequest {
+  readonly path: string;
+  readonly protocols: readonly string[];
+}
+
+/** Callbacks the WsRelayClient drives as the localhost WebSocket connection progresses. */
+export interface WsRelaySessionHandlers {
+  onOpen(protocol: string): void;
+  onMessage(data: Uint8Array, isBinary: boolean): void;
+  onClose(code: number, reason: string): void;
+  /** A connect-time or mid-connection failure. May fire instead of onOpen, or after it. */
+  onError(reason: string): void;
+}
+
+/** A live (or connecting) relayed WebSocket connection to the developer's localhost app. */
+export interface WsRelaySession {
+  send(data: Uint8Array, isBinary: boolean): void;
+  close(code: number, reason: string): void;
+}
+
+/**
+ * Opens a WebSocket to the developer's localhost app on the viewer's behalf.
+ * Loopback-confined the same way ReplayClient is — the target host:port is
+ * fixed at construction, never sourced from viewer input.
+ */
+export interface WsRelayClient {
+  connect(request: WsConnectRequest, handlers: WsRelaySessionHandlers): WsRelaySession;
 }

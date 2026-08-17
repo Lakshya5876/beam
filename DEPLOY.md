@@ -49,6 +49,8 @@ npm run build --prefix viewer
 
 # Expected output structure:
 #   viewer/dist/__beam/sw.js              — service worker (fixed filename)
+#   viewer/dist/__beam/ws-shim.js         — WebSocket relay shim, injected into
+#                                            relayed HTML responses (fixed filename)
 #   viewer/dist/assets/sw-bridge-*.js     — SW↔main bridge (hashed)
 #   viewer/dist/assets/main-*.js          — main app bundle (hashed)
 #   viewer/dist/index.html                — root HTML

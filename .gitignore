@@ -22,3 +22,7 @@ npm-debug.log*
 .claude/git_cache.json
 .claude/checkpoints/
 .claude/covenant_state.json
+
+# Local governance-bootstrap reference material — not project documentation
+v1_claude_code_development_guide_existing.md
+v1_implementation_package_existing.md

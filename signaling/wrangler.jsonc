@@ -1,6 +1,6 @@
 {
   // Beam signaling Worker config. Deploy is a human-only action performed
-  // off this machine (LOCAL-ONLY, CLAUDE.md §3) — see docs/deploy/.
+  // off this machine (LOCAL-ONLY) — see docs/deploy/.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "beam-signaling",
   "main": "src/worker.ts",

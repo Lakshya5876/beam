@@ -25,10 +25,15 @@ import {
   type RequestLogRepository,
   type RequestRecord,
   type Unsubscribe,
+  type WsConnectRequest,
+  type WsRelayClient,
+  type WsRelaySession,
+  type WsRelaySessionHandlers,
 } from '../src/domain/interfaces.js';
 import type { PeerConnectFailedError, PeerSignalingError } from '../src/infrastructure/peer-connection.js';
 import { DEFAULT_MULTIPLEXER_LIMITS, StreamMultiplexer } from '../src/application/protocol.js';
 import { ExecuteRelayUseCase, encodeRequestHead } from '../src/application/relay-use-case.js';
+import { encodeWsConnectHead } from '../src/application/ws-relay-use-case.js';
 import { ExecuteSessionUseCase } from '../src/application/session-use-case.js';
 import { RecordRequestUseCase } from '../src/application/diagnostics-use-case.js';
 import {
@@ -195,12 +200,31 @@ function makeReplayClient(impl: (r: ReplayRequest) => Result<ReplayResponse, Rep
 } {
   const calls: ReplayRequest[] = [];
   const client: ReplayClient = {
-    replay(request) {
+    async replay(request, sink) {
       calls.push(request);
-      return Promise.resolve(impl(request));
+      const result = impl(request);
+      if (!result.ok) {
+        return result;
+      }
+      await sink.onHead({ status: result.value.status, headers: result.value.headers });
+      if (result.value.body.byteLength > 0) {
+        await sink.onChunk(result.value.body);
+      }
+      await sink.onEnd();
+      return ok(undefined);
     },
   };
   return { client, calls };
+}
+
+/** A WsRelayClient fake that never actually connects — sufficient for tests
+ *  that don't exercise the WS relay path but need a HostFactories value. */
+class NoopWsRelayClient implements WsRelayClient {
+  public calls: WsConnectRequest[] = [];
+  connect(request: WsConnectRequest): WsRelaySession {
+    this.calls.push(request);
+    return { send: () => undefined, close: () => undefined };
+  }
 }
 
 class FakeRequestLogRepository implements RequestLogRepository {
@@ -321,6 +345,7 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
     runRelayLoop({
       mux,
       relay: new ExecuteRelayUseCase(client),
+      wsRelayClient: new NoopWsRelayClient(),
       recorder: new RecordRequestUseCase(repo, () => 42),
       allowedPaths: ['/api'],
       now: () => 42,
@@ -344,6 +369,7 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
     runRelayLoop({
       mux,
       relay: new ExecuteRelayUseCase(client),
+      wsRelayClient: new NoopWsRelayClient(),
       recorder: new RecordRequestUseCase(repo, () => 0),
       allowedPaths: ['/api'],
       now: () => 0,
@@ -371,6 +397,7 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
     runRelayLoop({
       mux,
       relay: new ExecuteRelayUseCase(client),
+      wsRelayClient: new NoopWsRelayClient(),
       recorder: new RecordRequestUseCase(repo, () => 0),
       allowedPaths: [],
       now: () => 0,
@@ -396,6 +423,141 @@ describe('runRelayLoop — authorization gates the relay (real StreamMultiplexer
   });
 });
 
+describe('runRelayLoop — WS relay routing (real StreamMultiplexer)', () => {
+  /** A WsRelayClient fake the test drives directly, exercising the real composition.ts wiring end-to-end (minus the actual localhost socket). */
+  class ControllableWsRelayClient implements WsRelayClient {
+    public lastRequest: WsConnectRequest | null = null;
+    public handlers: WsRelaySessionHandlers | null = null;
+    public sent: Array<{ data: Uint8Array; isBinary: boolean }> = [];
+    public closed: Array<{ code: number; reason: string }> = [];
+    connect(request: WsConnectRequest, handlers: WsRelaySessionHandlers): WsRelaySession {
+      this.lastRequest = request;
+      this.handlers = handlers;
+      return {
+        send: (data, isBinary) => {
+          this.sent.push({ data, isBinary });
+        },
+        close: (code, reason) => {
+          this.closed.push({ code, reason });
+        },
+      };
+    }
+  }
+
+  function wsConnectFrame(streamId: number, path: string): Frame {
+    return { type: FrameType.WS_CONNECT, streamId: sid(streamId), payload: pay(encodeWsConnectHead({ path, protocols: [] })) };
+  }
+
+  it('routes WS_CONNECT to the WsRelayClient and relays onOpen as WS_ACCEPT', async () => {
+    const transport = new FakePeerTransport();
+    const mux = new StreamMultiplexer(transport);
+    const ws = new ControllableWsRelayClient();
+    runRelayLoop({
+      mux,
+      relay: new ExecuteRelayUseCase(makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client),
+      wsRelayClient: ws,
+      recorder: new RecordRequestUseCase(new FakeRequestLogRepository(), () => 0),
+      allowedPaths: [],
+      now: () => 0,
+      waitForDrain: () => Promise.resolve(),
+    });
+
+    transport.emit(wsConnectFrame(11, '/socket'));
+    await flush();
+    expect(ws.lastRequest).toEqual({ path: '/socket', protocols: [] });
+
+    ws.handlers!.onOpen('');
+    expect(transport.sent.map((f) => f.type)).toEqual([FrameType.WS_ACCEPT]);
+  });
+
+  it('rejects WS_CONNECT against a disallowed path without ever calling the WsRelayClient', async () => {
+    const transport = new FakePeerTransport();
+    const mux = new StreamMultiplexer(transport);
+    const ws = new ControllableWsRelayClient();
+    runRelayLoop({
+      mux,
+      relay: new ExecuteRelayUseCase(makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client),
+      wsRelayClient: ws,
+      recorder: new RecordRequestUseCase(new FakeRequestLogRepository(), () => 0),
+      allowedPaths: ['/api'],
+      now: () => 0,
+      waitForDrain: () => Promise.resolve(),
+    });
+
+    transport.emit(wsConnectFrame(12, '/socket'));
+    await flush();
+    expect(ws.lastRequest).toBeNull();
+    expect(transport.sent.map((f) => f.type)).toEqual([FrameType.WS_REJECT]);
+  });
+
+  it('relays a full message round trip both directions and closes on WS_CLOSE', async () => {
+    const transport = new FakePeerTransport();
+    const mux = new StreamMultiplexer(transport);
+    const ws = new ControllableWsRelayClient();
+    runRelayLoop({
+      mux,
+      relay: new ExecuteRelayUseCase(makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client),
+      wsRelayClient: ws,
+      recorder: new RecordRequestUseCase(new FakeRequestLogRepository(), () => 0),
+      allowedPaths: [],
+      now: () => 0,
+      waitForDrain: () => Promise.resolve(),
+    });
+
+    transport.emit(wsConnectFrame(13, '/socket'));
+    await flush();
+    ws.handlers!.onOpen('');
+
+    // Viewer -> host: a text message arrives as HEAD+CHUNK+END.
+    transport.emit({ type: FrameType.WS_MESSAGE_HEAD, streamId: sid(13), payload: pay(new Uint8Array([0])) });
+    transport.emit({ type: FrameType.WS_MESSAGE_CHUNK, streamId: sid(13), payload: pay(new TextEncoder().encode('hi')) });
+    transport.emit({ type: FrameType.WS_MESSAGE_END, streamId: sid(13), payload: pay(new Uint8Array(0)) });
+    await flush();
+    expect(ws.sent).toHaveLength(1);
+    expect(new TextDecoder().decode(ws.sent[0]!.data)).toBe('hi');
+
+    // Host -> viewer: the local app sends a message back.
+    ws.handlers!.onMessage(new TextEncoder().encode('yo'), false);
+    const wsFrameTypes = transport.sent.filter((f) => f.type !== FrameType.WS_ACCEPT).map((f) => f.type);
+    expect(wsFrameTypes).toEqual([FrameType.WS_MESSAGE_HEAD, FrameType.WS_MESSAGE_CHUNK, FrameType.WS_MESSAGE_END]);
+
+    // Viewer closes.
+    transport.emit({ type: FrameType.WS_CLOSE, streamId: sid(13), payload: pay(new TextEncoder().encode(JSON.stringify({ code: 1000, reason: '' }))) });
+    await flush();
+    expect(ws.closed).toEqual([{ code: 1000, reason: '' }]);
+  });
+
+  it('a HOST-initiated close (the local app drops the connection, unprompted) still emits an outbound WS_CLOSE frame', async () => {
+    // Regression test: the session-bookkeeping cleanup used to run only
+    // reactively off the NEXT inbound frame, so a close the local app
+    // initiated with no further inbound activity on that stream would never
+    // clean up (and, in an earlier draft, never even emit the frame — see
+    // HostWsRelaySession's isClosed()/finish() single-source-of-truth doc).
+    const transport = new FakePeerTransport();
+    const mux = new StreamMultiplexer(transport);
+    const ws = new ControllableWsRelayClient();
+    runRelayLoop({
+      mux,
+      relay: new ExecuteRelayUseCase(makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client),
+      wsRelayClient: ws,
+      recorder: new RecordRequestUseCase(new FakeRequestLogRepository(), () => 0),
+      allowedPaths: [],
+      now: () => 0,
+      waitForDrain: () => Promise.resolve(),
+    });
+
+    transport.emit(wsConnectFrame(14, '/socket'));
+    await flush();
+    ws.handlers!.onOpen('');
+
+    // No inbound frame ever triggers this — the local app just closes.
+    ws.handlers!.onClose(1006, 'abnormal');
+    await flush();
+
+    expect(transport.sent.filter((f) => f.type === FrameType.WS_CLOSE)).toHaveLength(1);
+  });
+});
+
 describe('composeHost — wiring with injected fakes', () => {
   it('start() connects signaling and starts the peer; close() closes the session', async () => {
     const signaling = new FakeSignalingClient();
@@ -403,6 +565,7 @@ describe('composeHost — wiring with injected fakes', () => {
     const factories: HostFactories = {
       createLogStore: () => new FakeRequestLogRepository(),
       createReplayClient: () => makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client,
+      createWsRelayClient: () => new NoopWsRelayClient(),
       createSignalingClient: () => signaling,
       createPeer: () => peer,
     };
@@ -420,6 +583,7 @@ describe('composeHost — wiring with injected fakes', () => {
     const factories: HostFactories = {
       createLogStore: () => new FakeRequestLogRepository(),
       createReplayClient: () => makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client,
+      createWsRelayClient: () => new NoopWsRelayClient(),
       createSignalingClient: () => signaling,
       createPeer: () => new FakeHostPeer(),
     };

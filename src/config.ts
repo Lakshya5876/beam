@@ -1,7 +1,6 @@
 /**
- * Single source of truth for environment access (CLAUDE.md §3 SECURITY
- * INVARIANTS). Feature code never reads process.env directly — it receives
- * a BeamConfig. CORE_FILES member: editing semantics is a hard stop.
+ * Single source of truth for environment access. Feature code never reads
+ * process.env directly — it receives a BeamConfig.
  *
  * Deployment-facing keys (all optional; CLI flags override env, env
  * overrides compiled defaults):

@@ -1,57 +1,132 @@
 # Beam v1 — Known Limitations
 
-## SPA / single-document apps only
+## The iframe-shell architecture (how full navigation works, and where it doesn't)
 
-Beam v1 supports single-document and client-side-routed (SPA) applications — those
-that route via `history.pushState` and issue no top-level (server-side) navigations
-after the initial page load (Vite dev server, React Router, Vue Router, etc.).
+The viewer page is a thin **outer shell**: it holds the RTCPeerConnection, the
+service worker registration, and the DataChannel multiplexer. Once connected, it
+embeds your tunneled app in an `<iframe>` pointed at your app's own root page —
+the iframe is a genuinely separate browsing context, so full page navigations
+inside it (client-side routed *or* traditional server-rendered) do not tear down
+the outer shell's WebRTC connection. This is a real architectural fix, not a
+workaround: earlier designs that ran the RTCPeerConnection directly in the
+top-level document could only support single-page apps, because a tunneled
+top-level navigation would unload the document holding the connection.
 
-**Server-rendered multi-page apps are not supported.** The RTCPeerConnection and
-multiplexer live in the viewer page. A tunneled top-level navigation unloads that
-document, destroying the peer connection mid-flight. The new document has no
-connection to serve itself from — a deadlock, not a recoverable error.
+**What this does NOT fix**: the iframe still shares the viewer's origin
+(`beam-viewer.pages.dev` or wherever you deploy it) with every other Beam
+session that has ever run in the same browser profile — see "Session storage
+isolation" below. It also does not change the fact that your app's origin, as
+the browser sees it, is the viewer's origin — not `localhost`. Absolute URLs,
+OAuth redirect URIs, or CORS rules your app hardcodes against its own
+`localhost:<port>` origin will not resolve the way they would un-tunneled;
+Beam rewrites self-referential `Location` redirect headers (see below) but does
+not rewrite arbitrary absolute URLs inside HTML/JS/CSS bodies.
 
-The iframe-shell architecture (outer shell holds the connection; inner frame
-navigates freely) resolves this and is planned for a post-v1 release.
+### Self-referential redirects ARE rewritten
 
-## No TURN relay (~10–15% failure rate on symmetric NAT)
+If your app redirects to itself using an absolute URL — `Location:
+http://localhost:3000/dashboard` — Beam rewrites it to a path-relative
+`/dashboard` before relaying it, so the browser resolves it against the tunnel's
+own origin instead of trying (and failing) to reach `localhost` on the
+**viewer's** machine. Only `Location` headers pointing at `localhost` or
+`127.0.0.1` (any port) are rewritten; a redirect to a genuinely different host is
+left untouched.
 
-Beam uses direct peer-to-peer ICE without a TURN relay server. Connections fail on
-symmetric NAT topologies, which affect an estimated 10–15% of networks (corporate
-firewalls, some mobile carriers). Desktop-only; mobile network NAT behavior varies.
+## Session storage isolation (same browser profile, different sessions)
+
+Every Beam session currently uses the same viewer origin. If you run two
+*different* tunneling sessions from the same browser profile — even at
+different times, not simultaneously — cookies, `localStorage`, and the Cache
+API your tunneled app sets are **not** isolated between them: session B could
+see (or silently collide with) storage session A's app left behind. Using a
+fresh browser profile, an incognito/private window, or clearing site data for
+the viewer's origin between sessions avoids this. A real fix requires
+per-session subdomains (a bigger infrastructure change, deferred — see
+`docs/TRD.md` if you're picking this up later). This is not a concern for a
+single ongoing host+viewer pairing, only for reusing the same browser across
+unrelated sessions.
+
+## No TURN relay (fails outright on symmetric NAT / some CGNAT)
+
+Beam uses direct peer-to-peer ICE without a TURN relay server. Connections fail
+on symmetric NAT topologies (common on corporate firewalls) and on some carrier-
+grade NAT setups (increasingly common on mobile networks and a growing number of
+home ISPs). There is no fallback when this happens — the connection simply never
+leaves `checking`/`disconnected` and the viewer eventually shows a connection-
+failed message. This is the single biggest reliability gap for "just works for
+any two networks" and is not fixed in this release; see the Design Declaration
+in the project history for why it was explicitly deferred.
 
 `--ipv4-only` (both host and viewer — see README) mitigates a *different*
 failure mode: slow or failed nomination on dual-stack networks racing IPv6
-against IPv4 candidate pairs. It does not help symmetric NAT; that failure
+against IPv4 candidate pairs. It does not help symmetric NAT/CGNAT; that failure
 looks identical (`iceState` never leaves `checking`/`disconnected`) but has
-no address-family workaround — only TURN fixes it, and TURN is out of scope
-for v1 (see `signaling/src/ice-config.ts` for the config surface a future
-TURN integration would use). `BEAM_ICE_SERVERS`/`--ice` already accepts
-`turn:` URLs if you have your own TURN server; Beam does not provision one.
+no address-family workaround — only TURN fixes it. `BEAM_ICE_SERVERS`/`--ice`
+already accepts `turn:` URLs if you have your own TURN server; Beam does not
+provision one, and the signaling worker's `/ice-config` endpoint is public
+(anyone can `GET` it) so long-lived TURN credentials must never be placed
+there — use short-lived credentials or don't put TURN there at all until a
+proper credential-minting endpoint exists.
 
-## Reloading the viewer tab always starts a fresh connection
+## Reloading (or navigating) the OUTER viewer tab always starts a fresh connection
 
-The service worker excludes the viewer's own shell (`/`), its bundle
-(`/assets/*`), and `/__beam/*` from relay (`sw-fetch-gate.ts` `shouldBypassRelay`)
-so that a page reload can always re-fetch and re-run the bootstrap script,
-rather than hanging while the SW tries to relay the viewer's own JS through a
-peer connection that no longer exists post-unload. A reload always re-runs
-the PIN gate on the *same* session (the signaling URL + code are in the query
-string) — it does not resume the in-page connection state, since the
-RTCPeerConnection and multiplexer are destroyed on unload (see "SPA /
-single-document apps only" above).
+The service worker excludes the viewer's own shell (`/` on a genuine top-level
+document navigation), its bundle (`/assets/*`), and `/__beam/*` from relay
+(`sw-fetch-gate.ts` `shouldBypassRelay`) so that reloading the outer tab (or
+navigating its address bar) can always re-fetch and re-run the bootstrap
+script, rather than hanging while the SW tries to relay the viewer's own JS
+through a peer connection that no longer exists post-unload. Such a reload
+always re-runs the PIN gate on the *same* session (the signaling URL + code
+are in the query string) — it does not resume the in-page connection state,
+since the RTCPeerConnection and multiplexer are destroyed on unload.
 
-**Reserved paths**: if the tunneled target itself serves `/assets/*`, that
-prefix is shadowed by the viewer's own bundle instead of being relayed —
-a collision, not a crash. Avoid exposing a top-level `/assets/` route on the
-tunneled server, or accept the shadowing in v1.
+**This does not apply to navigation inside the tunneled-app iframe** — the
+iframe-shell architecture (see above) means the app itself can navigate
+freely, including full page loads, without affecting the outer connection at
+all. Only navigating the OUTER browser tab (its address bar, a bookmark, a
+hard reload of the top-level document) restarts the tunnel.
 
-## No WebSocket proxying
+**Reserved paths**: if the tunneled target itself serves `/assets/*` and the
+OUTER document somehow requests it (not the normal case — the iframe's own
+requests are correctly exempted regardless of path, see `shouldBypassRelay`'s
+`destination === 'iframe'` check), that prefix would be shadowed by the
+viewer's own bundle. In practice this only matters if you manually navigate
+the outer tab to a path under `/assets/`.
 
-Beam relays HTTP/1.1 request-response cycles over the WebRTC data channel. WebSocket
-upgrade requests (`Upgrade: websocket`) are not intercepted by the service worker and
-will fail or fall through to the network. Apps that depend on WebSocket connections
-to the proxied origin are not supported in v1.
+## WebSocket relay — supported, with caveats
+
+`new WebSocket(...)` calls made by your tunneled app ARE relayed over the same
+DataChannel as HTTP traffic. Since a service worker cannot intercept the
+WebSocket constructor (only `fetch()`), this works by injecting a small script
+into every relayed `text/html` response that replaces `window.WebSocket`
+inside the iframe with a lookalike that routes through the tunnel instead of
+opening a real socket.
+
+Known caveats:
+- **No cookie forwarding on the WS handshake.** The browser's WebSocket API
+  does not expose cookies as request headers to page JS, and the host dials
+  the local WebSocket from a separate Node process that does not share the
+  browser's cookie jar. An app that authenticates a WS connection via a
+  session cookie will not authenticate over the relay. Token-in-URL or
+  token-in-first-message auth patterns are unaffected.
+- **Compressed HTML responses don't get the shim.** Injecting into a
+  `Content-Encoding: gzip/br/deflate` body would corrupt it, so compressed
+  HTML is relayed byte-for-byte unmodified instead — correct, but without WS
+  support on that page. Most local dev servers don't compress HTML by
+  default, so this is uncommon in practice.
+- **The shim is a `type="module"` script.** It runs before any of the
+  tunneled app's own `type="module"` scripts (the common case for modern
+  bundled apps — Vite, Next.js, etc.), but an app relying solely on classic
+  (non-module) scripts that construct a WebSocket synchronously during
+  initial parse could theoretically race ahead of the shim.
+- **Blob payloads sent via `ws.send(blob)` can arrive slightly out of order**
+  relative to a `send()` called immediately after — reading a Blob is
+  inherently asynchronous, unlike the synchronous string/ArrayBuffer/typed-
+  array path. Rare in practice; most apps send JSON strings or binary
+  ArrayBuffers, not Blobs, on outgoing WS messages.
+- **`--allowed-paths` applies to WS connections too** — a WS endpoint at a
+  path not in the allow-list is rejected the same way an HTTP request would
+  be.
 
 ## Large request bodies buffered in browser memory
 

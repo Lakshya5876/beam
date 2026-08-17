@@ -65,6 +65,25 @@ Offset  Size  Field
 | 7 | `ERROR` | bidirectional | Stream-level error; payload is UTF-8 error string |
 | 8 | `PING` | bidirectional | Keepalive; no payload |
 | 9 | `PONG` | bidirectional | Keepalive reply to PING |
+| 10 | `WS_CONNECT` | viewer → host | JSON-encoded `{ path, protocols }` — opens a relayed WebSocket |
+| 11 | `WS_ACCEPT` | host → viewer | JSON-encoded `{ protocol }` |
+| 12 | `WS_REJECT` | host → viewer | UTF-8 reason string |
+| 13 | `WS_MESSAGE_HEAD` | bidirectional | 1 byte: isBinary flag; starts one WS message |
+| 14 | `WS_MESSAGE_CHUNK` | bidirectional | Raw message bytes, 0+ occurrences |
+| 15 | `WS_MESSAGE_END` | bidirectional | Empty; completes the message (does NOT close the stream) |
+| 16 | `WS_CLOSE` | bidirectional | JSON-encoded `{ code, reason }`; closes this half |
+
+A WS connection reuses the same `StreamId` space as HTTP streams, framed as
+`WS_MESSAGE_HEAD` + `WS_MESSAGE_CHUNK*` + `WS_MESSAGE_END` per message so a
+message spanning multiple `MAX_PAYLOAD_SIZE` frames still has an unambiguous
+boundary. `WS_CLOSE` is the only WS frame type treated as a stream half-closer
+(mirrors `REQUEST_END`/`RESPONSE_END`); implemented in
+`src/application/ws-relay-use-case.ts` and
+`src/infrastructure/ws-relay-client.ts` (host), `viewer/src/ws-bridge.ts` +
+`viewer/src/ws-shim.ts` (viewer). A service worker cannot intercept
+`new WebSocket()` — only `fetch()` — so the viewer side works by injecting the
+shim script into relayed HTML responses (`src/application/html-injection.ts`)
+rather than through the SW's fetch-interception path.
 
 ### 2.3 Stream lifecycle
 
@@ -95,11 +114,12 @@ A stream is **open** from `REQUEST_HEAD` until `RESPONSE_END` (or `ERROR`). Both
 | `MAX_PAYLOAD_SIZE` | 256 KiB (pre-S18) → 16 375 bytes (post-S18 if Proof 0 fails) | `src/domain/frame.ts:26` |
 | `MAX_FRAME_SIZE` | `HEADER_SIZE + MAX_PAYLOAD_SIZE` | `src/domain/frame.ts:27` |
 
-**S18 Proof 0 gate:** The Chromium / Firefox SCTP implementation has a de facto per-message interop ceiling of ~16 384 bytes. Frames larger than this ceiling may be silently dropped or cause a channel reset. If Proof 0 confirms this ceiling is hit, `MAX_PAYLOAD_SIZE` is reduced to `16 375` bytes (16 384 − 9 header bytes). This is a CORE_FILES change and triggers a mandatory Tier-3 test run.
-
-**If the ceiling is NOT hit (Branch A):** `MAX_PAYLOAD_SIZE` stays at 256 KiB. Large bodies (e.g. a 1 MB API response) are split into multiple ≤ 256 KiB frames at the host's relay layer.
-
-**If the ceiling IS hit (Branch B):** Large bodies require more, smaller frames. The mux already handles this transparently — the chunking granularity is just smaller.
+**Resolved (Branch B):** the Chromium/Firefox SCTP implementation has a de
+facto per-message interop ceiling of ~16 384 bytes; frames larger than this
+are silently dropped or cause a channel reset. `MAX_PAYLOAD_SIZE` is fixed at
+`16 375` bytes (16 384 − 9 header bytes) in the shipped code
+(`src/domain/frame.ts`) — large bodies are split into more, smaller frames;
+the mux handles this transparently at any chunking granularity.
 
 ### 2.5 Multiplexer limits
 
@@ -157,8 +177,8 @@ TURN credentials must be short-lived HMAC-derived tokens (RFC 8489 §9.2), never
 
 ### 3.3 Connection timeout
 
-Host-side: `DEFAULT_CONNECT_TIMEOUT_MS = 60 000 ms` (60 seconds from `src/infrastructure/peer-connection.ts`).  
-Rationale: ICE on complex NAT topologies requires time for all candidate pairs to be tested.
+Host-side: `DEFAULT_CONNECT_TIMEOUT_MS = 300 000 ms` (5 minutes, from `src/infrastructure/peer-connection.ts`).
+Rationale: ICE on complex NAT topologies requires time for all candidate pairs to be tested; generous by design since there is no TURN fallback to fail over to (see LIMITATIONS.md) — a slow-but-viable direct path is given every reasonable chance before giving up. The trade-off: without `--debug`, a user on a network that will never connect (symmetric NAT/CGNAT, no TURN) sees no failure message for up to 5 minutes.
 
 ---
 

@@ -4,7 +4,7 @@
  *
  * Presentation layer: formatting only; imports Application ONLY (the read
  * use-case). It does NOT import domain — formatters take a presentation-local
- * RequestRow that a domain RequestRecord satisfies structurally (CLAUDE.md §1).
+ * RequestRow that a domain RequestRecord satisfies structurally.
  *
  * DEFERRED (design §7): richer connection diagnostics — winning ICE candidate
  * type, RTT, peer browser/OS — are not exposed through the current seams; out

@@ -94,8 +94,21 @@ interface StreamState {
   bufferedBytes: number;
 }
 
+/** Closes a half outright: no more frames expected on it (HTTP) / the WS connection is done. */
 function isEndFrame(type: FrameType): boolean {
-  return type === FrameType.REQUEST_END || type === FrameType.RESPONSE_END;
+  return type === FrameType.REQUEST_END || type === FrameType.RESPONSE_END || type === FrameType.WS_CLOSE;
+}
+
+/**
+ * Releases this stream's buffered-byte accounting WITHOUT closing the half —
+ * a WS connection stays open across many messages, so "buffered bytes"
+ * must be scoped to the CURRENT message (bounding any single message's size)
+ * rather than accumulating for the connection's whole lifetime, or a
+ * long-lived, healthy WS connection would eventually trip the stream/total
+ * buffer caps on cumulative traffic alone.
+ */
+function releasesBufferOnly(type: FrameType): boolean {
+  return type === FrameType.WS_MESSAGE_END;
 }
 
 export class StreamMultiplexer {
@@ -263,6 +276,9 @@ export class StreamMultiplexer {
     this.totalBuffered += size;
     if (isEndFrame(frame.type)) {
       this.closeInbound(id);
+    } else if (releasesBufferOnly(frame.type)) {
+      this.totalBuffered -= stream.bufferedBytes;
+      stream.bufferedBytes = 0;
     }
     return ok();
   }

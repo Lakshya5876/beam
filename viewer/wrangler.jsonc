@@ -5,5 +5,22 @@
   // If the "beam-viewer" project name is taken, pick another and use that
   // name in every deploy doc/script that references it.
   "name": "beam-viewer",
-  "pages_build_output_dir": "dist"
+  "pages_build_output_dir": "dist",
+  // Advanced-mode merge: dist/_worker.js (bundled from _worker-src/entry.ts,
+  // see package.json's build:worker script) hosts signaling on the SAME
+  // origin as the static viewer bundle, instead of the separate
+  // beam-signaling.*.workers.dev origin — see docs/deploy/CLOUDFLARE_SETUP.md
+  // "single-origin merge" note for why. Pages cannot host a NEW Durable
+  // Object class itself — script_name binds to the class already defined
+  // and deployed in the beam-signaling Worker (cross-script binding). The
+  // client only ever talks to this pages.dev origin; which script actually
+  // hosts the DO instance is an internal Cloudflare-network detail.
+  "durable_objects": {
+    "bindings": [{ "name": "SESSIONS", "class_name": "SessionDurableObject", "script_name": "beam-signaling" }]
+  },
+  "vars": {
+    "ICE_SERVERS": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
+    "MINT_MAX_PER_MINUTE": "30",
+    "PIN_MAX_ATTEMPTS": "3"
+  }
 }

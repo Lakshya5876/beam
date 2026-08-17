@@ -54,7 +54,21 @@
 | **With PIN pairing** | **Blocked** — attacker connects as `viewer_pending`; must provide the 6-digit PIN to get `viewer` role; PIN was transmitted out-of-band |
 | **Residual risk** | Social engineering: attacker tricks host into sharing both URL and PIN simultaneously |
 | **Mitigation** | Documentation emphasizes sending URL and PIN via separate channels (e.g., URL in email, PIN over voice) |
-| **Implemented** | ✓ PIN validated server-side in DO before any ICE forwarding |
+| **Implemented** | ✓ PIN validated server-side in DO before any ICE forwarding in EITHER direction (see T1b — an earlier version only gated host→viewer forwarding) |
+
+---
+
+### T1b — Sole-viewer-slot squatting (found and fixed)
+
+| Attribute | Value |
+|---|---|
+| **Category** | Denial of Service |
+| **Actor** | Attacker who obtained the session URL but not the PIN |
+| **Attack** | Attacker's WebSocket connects to the session code as the second peer, claiming the sole `viewer` role slot, and simply never submits a PIN (or submits nothing at all) |
+| **Original bug** | Role assignment happens on connect, BEFORE any PIN check — `assignRole` rejects a third connection outright once host+viewer are both present. An attacker occupying the slot with no correct PIN permanently locked out the real viewer; there was no timeout. Compounded by `relayMessage` only gating host→viewer forwarding pre-verification, so a squatting attacker could also inject SDP/ICE frames at the host despite never proving PIN knowledge. |
+| **Fix** | `relayMessage` now withholds ALL signaling — both directions — until PIN verification succeeds. A Durable Object alarm evicts an unverified `viewer` socket 2 minutes after connecting (`VIEWER_VERIFY_TIMEOUT_MS`, `signaling/src/session-do.ts`), freeing the slot for a genuine viewer. |
+| **Verified live** | Against a real Durable Object (Miniflare/`wrangler dev`): an unverified attacker holding the slot received zero signaling messages; a genuine second viewer was correctly rejected (`session-full`) while the attacker squatted; the attacker's socket was evicted automatically ~2 minutes later, and a new viewer connection then succeeded. |
+| **Residual risk** | An attacker can repeat the squat-evict cycle indefinitely, denying service in ~2-minute windows rather than permanently. A per-IP rate limit on WebSocket *connection attempts* to a session code (distinct from the existing mint rate limit) would tighten this further; not implemented. |
 
 ---
 
@@ -202,13 +216,13 @@
 
 ---
 
-## 3. Security Invariants (from Architecture Guidelines — enforced at commit)
+## 3. Security Invariants
 
-These are non-negotiable and mechanically verified by the pre-commit gate:
+These are non-negotiable and mechanically verified before merge:
 
 | Invariant | Verification |
 |---|---|
-| Secrets/keys never written to disk | `git secrets` scan in gate.sh |
+| Secrets/keys never written to disk | Pre-commit secret scan |
 | `.env` never committed | `.gitignore` + pre-commit diff scan |
 | Raw exceptions never returned to clients | Application-layer error wrapping |
 | User input never interpolated into queries | Parameterised only; ESLint rule |
