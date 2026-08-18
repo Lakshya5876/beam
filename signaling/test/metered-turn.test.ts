@@ -192,3 +192,34 @@ describe('createMeteredProvider', () => {
     expect(provider).not.toBeNull();
   });
 });
+
+describe('MeteredTurnProvider — fetch is never called as a method on the provider', () => {
+  /**
+   * Real regression: `this.fetchImpl(...)` invokes fetch with `this` bound to
+   * the MeteredTurnProvider instance. Node's fetch tolerates this, but a real
+   * Cloudflare Worker's fetch does not — it fails with an illegal-invocation-
+   * style error, which this file's own catch-all reported as
+   * 'provider-unreachable', indistinguishable from a genuine network outage.
+   * Every unit test passed the whole time because they all run under Node.
+   * This double reproduces the receiver check so the bug class cannot
+   * silently reappear regardless of which runtime later tests happen to run
+   * under.
+   */
+  function receiverCheckedFetch(next: FetchLike): FetchLike {
+    return function receiverChecked(this: unknown, url: string, init?: unknown) {
+      if (this !== undefined) {
+        throw new TypeError('Illegal invocation: fetch called with a non-global receiver');
+      }
+      return next(url, init as never);
+    } as FetchLike;
+  }
+
+  it('mints successfully even when the injected fetch enforces a bare-call receiver', async () => {
+    const { impl } = fakeFetch({});
+    const provider = new MeteredTurnProvider({ appName: 'my-app', secretKey: SECRET }, receiverCheckedFetch(impl));
+
+    const result = await provider.mint(0);
+
+    expect(result.ok).toBe(true);
+  });
+});

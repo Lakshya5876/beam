@@ -131,12 +131,24 @@ export function parseIceServersResponse(value: unknown): IceServerEntry[] {
 
 export class MeteredTurnProvider implements TurnProvider {
   private readonly ttlSeconds: number;
+  private readonly fetchImpl: FetchLike;
 
   constructor(
     private readonly config: MeteredConfig,
-    private readonly fetchImpl: FetchLike,
+    fetchImpl: FetchLike,
   ) {
     this.ttlSeconds = config.ttlSeconds ?? DEFAULT_TTL_SECONDS;
+    // Deliberately NOT `this.fetchImpl = fetchImpl` as a parameter property:
+    // every call site below invokes this as `this.fetchImpl(...)`, which is a
+    // METHOD call — the receiver (this MeteredTurnProvider instance) becomes
+    // fetch's `this`. Cloudflare Workers' real fetch (unlike Node's) rejects
+    // that with an illegal-invocation-style failure, which this file's own
+    // catch-all then reported as 'provider-unreachable' — indistinguishable
+    // from a genuine network failure, so a live Worker never worked while
+    // this same code passed every unit test (Node's fetch does not enforce
+    // the receiver). Wrapping here makes every call site a bare invocation
+    // regardless of what was passed in, so this can never regress silently.
+    this.fetchImpl = (url, init) => fetchImpl(url, init);
   }
 
   private get baseUrl(): string {
