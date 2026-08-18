@@ -76,13 +76,28 @@ those are merged with whatever `/ice-config` serves rather than replacing it.
 failure mode: slow or failed nomination on dual-stack networks racing IPv6
 against IPv4 candidate pairs. It does not help symmetric NAT/CGNAT.
 
-**Verification status:** the direct path and the no-relay-available failure
-path are covered by `e2e-connection.mjs`, which asserts the ICE path actually
-selected. The scenario proving TURN *carries* a working session end-to-end
-requires real provider credentials and runs only when they are supplied
-(`BEAM_E2E_TURN_APP` / `BEAM_E2E_TURN_SECRET`); it has not been run against a
-live TURN server in this repository yet, and the suite skips it loudly rather
-than reporting a pass.
+**Verification status:** all three ICE paths are covered by
+`e2e-connection.mjs` and have been run against a live Metered TURN account —
+not just asserted to compile. DIRECT connects on a normal network and reports
+`path=direct` (TURN is not the default transport). The no-relay-available
+failure path fails deterministically with a stage-tagged diagnostic. The
+relay path — forcing `iceTransportPolicy:'relay'` on BOTH peers, so no direct
+pair can win — completed through Metered's real infrastructure
+(`DataChannel OPEN path=RELAY (TURN)`) and relayed a real HTTP request through
+it. Re-running this requires your own provider credentials
+(`BEAM_E2E_TURN_APP` / `BEAM_E2E_TURN_SECRET`); without them the suite skips
+that one scenario loudly rather than reporting a false pass.
+
+One real bug surfaced only by this live testing, not by any unit test: the
+Metered provider called the injected `fetch` as `this.fetchImpl(...)` — a
+method call, so `fetch`'s `this` became the provider instance rather than the
+global scope. Node's `fetch` tolerates that; a real Cloudflare Worker's does
+not, and rejected every mint attempt on every real deployment, in every
+configuration, indistinguishable from a network outage. All 18 unit tests for
+this module passed throughout, because they run under Node. Fixed at the
+constructor (the injected fetch is wrapped in an arrow function before being
+stored), with a regression test that reproduces the receiver check a real
+Worker enforces.
 
 ## Reloading (or navigating) the OUTER viewer tab always starts a fresh connection
 
