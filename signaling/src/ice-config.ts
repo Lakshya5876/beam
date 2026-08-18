@@ -1,28 +1,35 @@
 /**
- * ICE configuration served to viewers at GET /ice-config. Pure: parses the
- * ICE_SERVERS env value (a JSON array of RTCIceServer-shaped objects) and
- * falls back to the public Google STUN server when unset or malformed.
+ * ICE configuration served to BOTH peers at GET /ice-config — the viewer's
+ * browser (bootstrap.ts) and the host CLI (src/infrastructure/
+ * ice-config-client.ts) fetch the same endpoint, so the two ends of a session
+ * are configured from one source of truth.
  *
- * Why served, not bundled: the viewer is a static Pages bundle — baking ICE
- * servers in means redeploying the viewer to rotate a TURN host. Serving it
- * from the worker makes ICE a deploy-time `wrangler.jsonc` var (or a secret,
- * for TURN credentials) with no rebuild.
+ * Composition, in the order ICE should prefer them:
+ *   1. STUN — always present (deploy-time ICE_SERVERS, else a public default).
+ *      Enough on its own for the direct P2P path, which is what most sessions
+ *      use and what Beam prefers.
+ *   2. TURN — appended when a TurnProvider is configured, carrying freshly
+ *      minted, short-lived credentials. Adding relay candidates does NOT make
+ *      traffic relayed: ICE runs its connectivity checks over all candidate
+ *      pairs and nominates a relay pair only when no direct pair works.
  *
- * NOTE: whatever is returned here is public — anyone can GET it. Long-lived
- * TURN credentials placed in ICE_SERVERS are therefore exposed; use
- * short-lived credentials or a separate auth layer before adding TURN
- * (documented in docs/deploy/CLOUDFLARE_SETUP.md).
+ * Degradation is deliberate: if TURN minting fails for any reason, the
+ * response still carries STUN and the session still connects over direct P2P.
+ * A TURN outage must never be a Beam outage.
+ *
+ * Exposure note: this endpoint is public by design (a peer needs it before
+ * it can prove anything about a session). That is exactly why the credentials
+ * it carries are short-lived and per-mint, and why the provider secret that
+ * mints them never appears in the response — see turn-provider.ts.
  */
+
+import type { IceServerEntry, TurnProvider } from './turn-provider.js';
+
+export type { IceServerEntry };
 
 export const DEFAULT_ICE_SERVERS: readonly IceServerEntry[] = [
   { urls: 'stun:stun.l.google.com:19302' },
 ];
-
-export interface IceServerEntry {
-  readonly urls: string | readonly string[];
-  readonly username?: string;
-  readonly credential?: string;
-}
 
 function isValidEntry(value: unknown): value is IceServerEntry {
   if (typeof value !== 'object' || value === null) {
@@ -52,7 +59,41 @@ export function parseIceServersEnv(raw: string | undefined): readonly IceServerE
   return parsed as IceServerEntry[];
 }
 
+/** What the peers receive, plus what the Worker reports about this response. */
+export interface IceConfigResult {
+  /** JSON body for GET /ice-config. */
+  readonly body: string;
+  /** True when the body carries usable relay (TURN) servers. */
+  readonly hasTurn: boolean;
+  /** Set only when a configured provider failed to mint — for the response
+   *  diagnostic header; never carries provider internals. */
+  readonly turnFailure?: string;
+}
+
 /** The JSON body served at GET /ice-config — RTCPeerConnection-consumable. */
 export function iceConfigBody(raw: string | undefined): string {
   return JSON.stringify({ iceServers: parseIceServersEnv(raw) });
+}
+
+/**
+ * Build the /ice-config response: STUN always, TURN appended when a provider
+ * is configured AND minting succeeds. `provider` is null on a STUN-only
+ * deployment, which is a supported configuration rather than a failure.
+ */
+export async function resolveIceConfig(
+  raw: string | undefined,
+  provider: TurnProvider | null,
+  nowMs: number,
+): Promise<IceConfigResult> {
+  const stun = parseIceServersEnv(raw);
+  if (!provider) {
+    return { body: JSON.stringify({ iceServers: stun }), hasTurn: false };
+  }
+  const minted = await provider.mint(nowMs);
+  if (!minted.ok) {
+    // STUN-only: direct P2P still works for the majority of networks.
+    return { body: JSON.stringify({ iceServers: stun }), hasTurn: false, turnFailure: minted.failure };
+  }
+  const iceServers = [...stun, ...minted.value.iceServers];
+  return { body: JSON.stringify({ iceServers }), hasTurn: minted.value.iceServers.length > 0 };
 }

@@ -12,6 +12,7 @@ import {
 import {
   err,
   ok,
+  type IceConfigClient,
   type PeerTransport,
   type Result,
   type SignalingClient,
@@ -41,6 +42,7 @@ import {
   composeApp,
   composeHost,
   forwardLocalSignals,
+  resolveHostIceServers,
   runConnection,
   runRelayLoop,
   type ConnectablePeer,
@@ -558,6 +560,11 @@ describe('runRelayLoop — WS relay routing (real StreamMultiplexer)', () => {
   });
 });
 
+/** ICE config is fetched at startup; these cases exercise other wiring. */
+function stubIceConfigClient(): IceConfigClient {
+  return { fetchIceServers: () => Promise.resolve(err({ error: 'IceConfigFetchFailed', reason: 'stub' })) };
+}
+
 describe('composeHost — wiring with injected fakes', () => {
   it('start() connects signaling and starts the peer; close() closes the session', async () => {
     const signaling = new FakeSignalingClient();
@@ -567,6 +574,7 @@ describe('composeHost — wiring with injected fakes', () => {
       createReplayClient: () => makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client,
       createWsRelayClient: () => new NoopWsRelayClient(),
       createSignalingClient: () => signaling,
+      createIceConfigClient: () => stubIceConfigClient(),
       createPeer: () => peer,
     };
     const runtime = composeHost({ localPort: 3000, signalingUrl: 'ws://127.0.0.1:9', now: () => 1 }, factories);
@@ -585,6 +593,7 @@ describe('composeHost — wiring with injected fakes', () => {
       createReplayClient: () => makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client,
       createWsRelayClient: () => new NoopWsRelayClient(),
       createSignalingClient: () => signaling,
+      createIceConfigClient: () => stubIceConfigClient(),
       createPeer: () => new FakeHostPeer(),
     };
     const runtime = composeHost({ localPort: 3000, signalingUrl: 'ws://127.0.0.1:9', now: () => 1 }, factories);
@@ -592,5 +601,61 @@ describe('composeHost — wiring with injected fakes', () => {
     const result = await runtime.registerPin(fakeHash);
     expect(result.ok).toBe(true);
     expect(signaling.registeredPinHashes).toContain(fakeHash);
+  });
+});
+
+describe('resolveHostIceServers — the host gets the same relay candidates as the viewer', () => {
+  const fetched = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'turn:relay.example.com:80', username: 'u', credential: 'c' },
+  ];
+
+  function clientReturning(value: typeof fetched): IceConfigClient {
+    return { fetchIceServers: () => Promise.resolve(ok(value)) };
+  }
+
+  it('merges locally-pinned servers ahead of fetched ones', async () => {
+    const pinned = [{ urls: 'stun:self-hosted.example.com:3478' }];
+
+    const resolved = await resolveHostIceServers(clientReturning(fetched), 'ws://sig', pinned, () => {});
+
+    expect(resolved).toEqual([
+      { urls: 'stun:self-hosted.example.com:3478' },
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turn:relay.example.com:80', username: 'u', credential: 'c' },
+    ]);
+  });
+
+  it('returns the fetched servers when nothing is pinned', async () => {
+    const resolved = await resolveHostIceServers(clientReturning(fetched), 'ws://sig', undefined, () => {});
+    expect(resolved).toEqual(fetched);
+  });
+
+  it('keeps the configured servers and continues when the fetch fails', async () => {
+    // A TURN/ICE-config outage must not stop the host from attempting a
+    // direct connection, which is what most networks use anyway.
+    const client: IceConfigClient = {
+      fetchIceServers: () => Promise.resolve(err({ error: 'IceConfigFetchFailed', reason: 'offline' })),
+    };
+    const pinned = [{ urls: 'stun:self-hosted.example.com:3478' }];
+    const logs: string[] = [];
+
+    const resolved = await resolveHostIceServers(client, 'ws://sig', pinned, (m) => logs.push(m));
+
+    expect(resolved).toEqual(pinned);
+    expect(logs.some((l) => l.includes('offline'))).toBe(true);
+  });
+
+  it('reports whether the resolved set actually offers a relay path', async () => {
+    const logs: string[] = [];
+    await resolveHostIceServers(clientReturning(fetched), 'ws://sig', undefined, (m) => logs.push(m));
+    expect(logs.some((l) => l.includes('relay=true'))).toBe(true);
+
+    const stunOnly: IceConfigClient = {
+      fetchIceServers: () => Promise.resolve(ok([{ urls: 'stun:stun.l.google.com:19302' }])),
+    };
+    const logs2: string[] = [];
+    await resolveHostIceServers(stunOnly, 'ws://sig', undefined, (m) => logs2.push(m));
+    expect(logs2.some((l) => l.includes('relay=false'))).toBe(true);
   });
 });

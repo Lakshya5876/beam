@@ -21,9 +21,11 @@
 import nodeDataChannel from 'node-datachannel';
 import { decodeFrame, encodeFrame, isFrameDecodeError, MAX_FRAME_SIZE, type Frame } from '../domain/frame.js';
 import { resolveWithFallback } from './mdns-resolve.js';
+import { parseIceUrl } from '../application/ice-servers.js';
 import {
   err,
   ok,
+  type IceServerConfig,
   type PeerTransport,
   type Result,
   type TransportClosedError,
@@ -32,6 +34,68 @@ import {
 
 export const DEFAULT_STUN_SERVER = 'stun:stun.l.google.com:19302';
 export const DEFAULT_CONNECT_TIMEOUT_MS = 300_000;
+
+/**
+ * node-datachannel's structured ICE server (mirrors its RtcConfig.iceServers
+ * member). Declared structurally rather than imported so the native type stays
+ * confined to this adapter, like NativePeerConnection above.
+ */
+export interface NativeIceServer {
+  readonly hostname: string;
+  readonly port: number;
+  readonly username?: string;
+  readonly password?: string;
+  readonly relayType?: 'TurnUdp' | 'TurnTcp' | 'TurnTls';
+}
+
+/** TURN over TLS is `turns:`; plain TURN splits on the transport parameter. */
+function relayTypeOf(scheme: string, transport: string): 'TurnUdp' | 'TurnTcp' | 'TurnTls' {
+  if (scheme === 'turns') {
+    return 'TurnTls';
+  }
+  return transport === 'tcp' ? 'TurnTcp' : 'TurnUdp';
+}
+
+/**
+ * Convert one domain ICE server into node-datachannel's form. Returns null
+ * for an unparseable URL, or a TURN entry missing credentials — both are
+ * dropped rather than handed to the native layer, which treats a malformed
+ * server as a hard construction failure and would take the whole connection
+ * down over one bad entry.
+ *
+ * The structured form is used deliberately over `turn:user:pass@host:port`:
+ * a minted password may contain ':' or '@'.
+ */
+export function toNativeIceServer(entry: IceServerConfig): NativeIceServer | null {
+  const parsed = parseIceUrl(entry.urls);
+  if (!parsed) {
+    return null;
+  }
+  if (parsed.scheme === 'stun' || parsed.scheme === 'stuns') {
+    return { hostname: parsed.host, port: parsed.port };
+  }
+  if (entry.username === undefined || entry.credential === undefined) {
+    return null;
+  }
+  return {
+    hostname: parsed.host,
+    port: parsed.port,
+    username: entry.username,
+    password: entry.credential,
+    relayType: relayTypeOf(parsed.scheme, parsed.transport),
+  };
+}
+
+export function toNativeIceServers(entries: readonly IceServerConfig[]): NativeIceServer[] {
+  const out: NativeIceServer[] = [];
+  for (const entry of entries) {
+    const native = toNativeIceServer(entry);
+    if (native) {
+      out.push(native);
+    }
+  }
+  return out;
+}
 
 /** Infra-internal port: the subset of a native data channel we depend on. */
 export interface NativeDataChannel {
@@ -70,7 +134,22 @@ export interface NativePeerConnection {
   onGatheringStateChange?(cb: (state: string) => void): void;
 }
 
-export type NativePeerConnectionFactory = (iceServers: string[], maxMessageSize: number) => NativePeerConnection;
+/**
+ * 'all' (the default) lets ICE try every candidate pair and nominate the best
+ * one — direct whenever a direct pair works, relay only as the fallback.
+ * 'relay' suppresses host/srflx candidates entirely, forcing traffic through
+ * TURN; it exists to VERIFY the relay path end-to-end (and to diagnose a
+ * user's network), never as the normal transport.
+ */
+export type IceTransportPolicy = 'all' | 'relay';
+
+export interface NativePeerOptions {
+  readonly iceServers: NativeIceServer[];
+  readonly maxMessageSize: number;
+  readonly iceTransportPolicy?: IceTransportPolicy;
+}
+
+export type NativePeerConnectionFactory = (options: NativePeerOptions) => NativePeerConnection;
 
 export type PeerRole = 'offer' | 'answer';
 
@@ -173,20 +252,26 @@ export function initNativeLogging(level: string): void {
   }
 }
 
-function defaultFactory(iceServers: string[], maxMessageSize: number): NativePeerConnection {
+function defaultFactory(options: NativePeerOptions): NativePeerConnection {
   // The real node-datachannel PeerConnection structurally satisfies the port;
   // the cast confines native typing to this one adapter line.
-  return new nodeDataChannel.PeerConnection('beam', { iceServers, maxMessageSize }) as unknown as NativePeerConnection;
+  return new nodeDataChannel.PeerConnection('beam', {
+    iceServers: options.iceServers as nodeDataChannel.RtcConfig['iceServers'],
+    maxMessageSize: options.maxMessageSize,
+    ...(options.iceTransportPolicy !== undefined && { iceTransportPolicy: options.iceTransportPolicy }),
+  }) as unknown as NativePeerConnection;
 }
 
 interface PeerConnectionOptions {
   readonly role: PeerRole;
-  readonly iceServers?: string[];
+  readonly iceServers?: readonly IceServerConfig[];
   readonly connectTimeoutMs?: number;
   readonly maxMessageSize?: number;
   readonly factory?: NativePeerConnectionFactory;
   readonly resolveMdns?: (host: string) => Promise<string>;
   readonly log?: (msg: string) => void;
+  /** See IceTransportPolicy — 'relay' is a verification/diagnostic mode. */
+  readonly iceTransportPolicy?: IceTransportPolicy;
   /**
    * Drop IPv6 candidates in both directions (--ipv4-only). Opt-in mitigation:
    * stalled IPv6 pairs were observed adding ~10s to nomination (and
@@ -224,7 +309,18 @@ export class PeerConnectionTransport implements PeerTransport {
     this.ipv4Only = options.ipv4Only ?? false;
     this.log = options.log ?? ((): void => { /* noop */ });
     const factory = options.factory ?? defaultFactory;
-    this.pc = factory(options.iceServers ?? [DEFAULT_STUN_SERVER], options.maxMessageSize ?? MAX_FRAME_SIZE);
+    const configured = options.iceServers ?? [{ urls: DEFAULT_STUN_SERVER }];
+    const native = toNativeIceServers(configured);
+    this.log(
+      `[HOST-PC] iceServers=${String(native.length)}/${String(configured.length)} usable` +
+        ` relay=${String(native.some((s) => s.relayType !== undefined))}` +
+        ` policy=${options.iceTransportPolicy ?? 'all'}`,
+    );
+    this.pc = factory({
+      iceServers: native,
+      maxMessageSize: options.maxMessageSize ?? MAX_FRAME_SIZE,
+      ...(options.iceTransportPolicy !== undefined && { iceTransportPolicy: options.iceTransportPolicy }),
+    });
     this.wirePeerConnection();
   }
 

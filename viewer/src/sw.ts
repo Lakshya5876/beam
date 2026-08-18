@@ -130,12 +130,33 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(handleFetch(streamId, event.request, event.clientId));
 });
 
+/**
+ * The relay target must be the document that OWNS the mux — the outer shell
+ * that holds the RTCPeerConnection and answers 'relay-request'. That is
+ * exactly the client which sent 'mux-ready', i.e. gate.source.
+ *
+ * Preferring the fetch's own clientId (as this did) silently broke every
+ * request made BY the tunneled app: the app runs inside the iframe, so
+ * event.clientId is the IFRAME's client, and the frames were posted to a
+ * document with no relay listener — the request then hung until it timed out.
+ * Only the iframe's top-level NAVIGATION worked, because a navigation request
+ * has no client yet (empty clientId) and so fell through to gate.source.
+ *
+ * gate.source is only ever set by a live mux-ready, and a service-worker
+ * restart clears it entirely (module state is lost) — at which point the
+ * fetch handler re-arms it by asking the window clients. So it cannot go
+ * stale in a way that clientId would rescue; clientId remains only as a
+ * last-resort fallback for a fetch arriving before the first mux-ready.
+ */
 async function resolveRelayTarget(clientId: string): Promise<WindowClient | null> {
+  if (gate.source) {
+    return gate.source as WindowClient;
+  }
   if (clientId) {
     const fetchClient = await self.clients.get(clientId);
     if (fetchClient) return fetchClient as WindowClient;
   }
-  return gate.source as WindowClient | null;
+  return null;
 }
 
 function postRelayFrames(source: WindowClient, streamId: number, frames: ReturnType<typeof encodeRequest>): void {

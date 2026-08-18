@@ -32,7 +32,10 @@ describe('config module', () => {
     const config = loadConfig({
       BEAM_ICE_SERVERS: 'stun:stun.example.com:3478, turn:user:pass@turn.example.com:3478',
     });
-    expect(config.iceServers).toEqual(['stun:stun.example.com:3478', 'turn:user:pass@turn.example.com:3478']);
+    expect(config.iceServers).toEqual([
+      { urls: 'stun:stun.example.com:3478' },
+      { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' },
+    ]);
   });
 
   it('test_load_config_treats_empty_or_blank_ice_servers_as_unset', () => {

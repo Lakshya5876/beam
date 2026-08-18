@@ -24,16 +24,71 @@ import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
 import { createWsBridge } from './ws-bridge.js';
+import {
+  classifySelectedPath,
+  ConnectionReport,
+  describeFailure,
+  isRelayOnlyRequested,
+  type ConnectionFacts,
+  type SelectedPath,
+} from './connection-report.js';
+
+declare global {
+  interface Window {
+    /**
+     * The connection's own diagnostic facts — which stage it reached, whether
+     * a relay was available, and which ICE path was actually selected. Read by
+     * the E2E suite to assert direct-vs-relay, and available in the console
+     * when supporting a user whose session failed. Contains no application
+     * data (see connection-report.ts).
+     */
+    __beamConnection?: ConnectionFacts;
+  }
+}
 
 const FALLBACK_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 const ICE_CONFIG_TIMEOUT_MS = 3000;
 
 /**
- * Fetch deploy-time ICE configuration from the signaling worker
- * (GET /ice-config). Total: any failure — network, timeout, bad JSON —
- * falls back to the public STUN default so the connection still attempts.
+ * How long the viewer waits for the DataChannel before declaring failure.
+ *
+ * Without this the viewer waited forever: an ICE agent that never nominates a
+ * pair (no reachable relay, a firewall dropping every candidate) leaves
+ * RTCPeerConnection in 'checking' indefinitely and no 'failed' event ever
+ * fires, so the page sat on "connecting…" with no explanation and no cleanup.
+ * ICE normally settles in a few seconds; a relayed path adds little. 45s is
+ * well past any healthy case while still bounded for the user.
  */
-export async function fetchIceServers(signalingBaseUrl: string): Promise<RTCIceServer[]> {
+export const CONNECT_TIMEOUT_MS = 45_000;
+
+export interface IceConfigResult {
+  readonly iceServers: RTCIceServer[];
+  /** `x-beam-turn` from the worker: 'available' | 'not-configured' | a typed
+   *  mint failure. Null when the response did not carry it. */
+  readonly turnState: string | null;
+  /** True when at least one usable TURN server came back. */
+  readonly hasRelay: boolean;
+}
+
+/** A relay server is only usable if it carries the credentials TURN needs. */
+function containsUsableRelay(servers: readonly RTCIceServer[]): boolean {
+  return servers.some((server) => {
+    const urls = typeof server.urls === 'string' ? [server.urls] : server.urls;
+    const isTurn = urls.some((u) => /^turns?:/i.test(u));
+    return isTurn && typeof server.username === 'string' && typeof server.credential === 'string';
+  });
+}
+
+/**
+ * Fetch ICE configuration from the signaling origin (GET /ice-config) — the
+ * same endpoint and response the host CLI reads, so both ends of the session
+ * get the same STUN and (when configured) the same TURN relay.
+ *
+ * Total: any failure — network, timeout, bad JSON — falls back to public STUN
+ * so a direct connection is still attempted. A TURN outage must never be a
+ * Beam outage.
+ */
+export async function fetchIceServers(signalingBaseUrl: string): Promise<IceConfigResult> {
   try {
     const httpBase = signalingBaseUrl.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/+$/, '');
     // Strip a trailing session-code path segment if present: the worker
@@ -43,19 +98,45 @@ export async function fetchIceServers(signalingBaseUrl: string): Promise<RTCIceS
     const timer = setTimeout(() => { controller.abort(); }, ICE_CONFIG_TIMEOUT_MS);
     const resp = await fetch(url, { signal: controller.signal });
     clearTimeout(timer);
+    const turnState = resp.headers.get('x-beam-turn');
     if (!resp.ok) {
-      return FALLBACK_ICE_SERVERS;
+      return { iceServers: FALLBACK_ICE_SERVERS, turnState, hasRelay: false };
     }
     const body = (await resp.json()) as { iceServers?: unknown };
     if (Array.isArray(body.iceServers) && body.iceServers.length > 0) {
-// console.log(`[VIEWER-BOOT] ice-config loaded: ${String(body.iceServers.length)} server(s)`);
-      return body.iceServers as RTCIceServer[];
+      const iceServers = body.iceServers as RTCIceServer[];
+      return { iceServers, turnState, hasRelay: containsUsableRelay(iceServers) };
     }
-    return FALLBACK_ICE_SERVERS;
+    return { iceServers: FALLBACK_ICE_SERVERS, turnState, hasRelay: false };
   } catch {
-// console.log('[VIEWER-BOOT] ice-config fetch failed — using STUN fallback');
-    return FALLBACK_ICE_SERVERS;
+    return { iceServers: FALLBACK_ICE_SERVERS, turnState: null, hasRelay: false };
   }
+}
+
+/**
+ * Read the ICE pair that actually carried the session, so a successful
+ * connection reports whether it went direct or through TURN. Uses getStats()
+ * — the standard API, supported in Chrome, Edge, Firefox, and Safari — rather
+ * than any vendor-specific accessor. Returns 'unknown' rather than throwing if
+ * a browser reports stats differently than expected.
+ */
+export async function readSelectedPath(pc: RTCPeerConnection): Promise<SelectedPath> {
+  try {
+    const stats = await pc.getStats();
+    const byId = new Map<string, { type?: string; candidateType?: string; nominated?: boolean; state?: string; localCandidateId?: string; remoteCandidateId?: string }>();
+    stats.forEach((entry, id) => { byId.set(id, entry as never); });
+    for (const entry of byId.values()) {
+      if (entry.type !== 'candidate-pair' || entry.state !== 'succeeded') {
+        continue;
+      }
+      const local = entry.localCandidateId !== undefined ? byId.get(entry.localCandidateId) : undefined;
+      const remote = entry.remoteCandidateId !== undefined ? byId.get(entry.remoteCandidateId) : undefined;
+      return classifySelectedPath(local?.candidateType, remote?.candidateType);
+    }
+  } catch {
+    // Diagnostics must never break a working connection.
+  }
+  return 'unknown';
 }
 
 export async function bootstrap(signalingBaseUrl: string): Promise<void> {
@@ -91,13 +172,20 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     return;
   }
 
+  // Records how far the connection actually got, so a failure can say which
+  // stage it died at instead of one generic message for every cause. Exposed
+  // as a live getter rather than a snapshot — a snapshot taken at 'connected'
+  // would permanently omit every stage reached afterwards.
+  const report = new ConnectionReport();
+  Object.defineProperty(window, '__beamConnection', {
+    configurable: true,
+    get: () => report.facts(),
+  });
+
   const base = signalingBaseUrl.replace(new RegExp(`/${sessionCode}$`), '');
   const wsUrl = buildViewerSignalingUrl(base, sessionCode);
-// console.log(`[VIEWER-BOOT] base=${base} wsUrl=${wsUrl}`);
   const ws = new WebSocket(wsUrl);
-  ws.addEventListener('open', () => { console.log('[VIEWER-BOOT] WS OPEN'); });
-  ws.addEventListener('close', (e) => { console.log(`[VIEWER-BOOT] WS CLOSE code=${String(e.code)} reason=${e.reason}`); });
-  ws.addEventListener('error', () => { console.log('[VIEWER-BOOT] WS ERROR'); });
+  ws.addEventListener('open', () => { report.reach('signaling-connect'); });
 
   // M3 PIN gate: show PIN form, wait for DO to confirm or lock.
   // Returns buffered post-pin-ok messages to prevent the offer-drop race.
@@ -105,16 +193,39 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   if (buffered === null) {
     return; // renderPinLocked already shown inside requestPinVerification
   }
+  report.reach('pin-verify');
 
   root.textContent = renderConnecting();
 
-  const iceServers = await fetchIceServers(base);
-  const pc = new RTCPeerConnection({ iceServers });
-// console.log('[VIEWER-BOOT] RTCPeerConnection created');
+  const ice = await fetchIceServers(base);
+  report.reach('ice-config');
+  report.noteTurnState(ice.turnState, ice.hasRelay);
+
+  // relay=1 forces every candidate through TURN. This exists to VERIFY the
+  // relay path (and to diagnose a network that needs it) — normal sessions
+  // leave it off so ICE prefers a direct pair and relays only as fallback.
+  const relayOnly = isRelayOnlyRequested(window.location.search);
+  if (relayOnly) {
+    report.noteRelayOnlyRequested();
+  }
+  const pc = new RTCPeerConnection({
+    iceServers: ice.iceServers,
+    ...(relayOnly && { iceTransportPolicy: 'relay' as const }),
+  });
 
   const peerAdapter = new BrowserPeerAdapter(pc);
   const socketAdapter = new BrowserWebSocketAdapter(ws);
   const conn = new ViewerConnection(peerAdapter, socketAdapter, { ipv4Only: isIpv4OnlyRequested() });
+  pc.addEventListener('icegatheringstatechange', () => {
+    if (pc.iceGatheringState !== 'new') {
+      report.reach('ice-gathering');
+    }
+  });
+  pc.addEventListener('iceconnectionstatechange', () => {
+    if (pc.iceConnectionState === 'checking') {
+      report.reach('ice-connect');
+    }
+  });
   // CRITICAL ORDER: stop the pin-gate buffer listener BEFORE replaying.
   // Replay uses ws.dispatchEvent, which fires EVERY listener — with the
   // buffer listener still attached, each replayed event re-appends to the
@@ -127,8 +238,25 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     ws.dispatchEvent(new MessageEvent('message', { data: event.data }));
   }
 
+  // Bounded wait: without it a never-nominating ICE agent leaves the page on
+  // "connecting…" forever (see CONNECT_TIMEOUT_MS). Cleared on success.
+  const connectTimer = setTimeout(() => {
+    if (report.transportEstablished()) {
+      return;
+    }
+    root.textContent = describeFailure(report.facts());
+    conn.close();
+  }, CONNECT_TIMEOUT_MS);
+
   conn.onconnectionstate((state) => {
     if (state === 'connected') {
+      clearTimeout(connectTimer);
+      report.reach('datachannel-open');
+      // Report the path ICE actually chose — the evidence for whether this
+      // session went direct or fell back to TURN.
+      void readSelectedPath(pc).then((path) => {
+        report.noteSelectedPath(path);
+      });
       // Embed the tunneled app in an iframe rather than navigating this
       // document to it — a full navigation here would unload the
       // RTCPeerConnection/SW registration living in this page (see
@@ -142,12 +270,14 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
         frame.src = '/';
       }
     } else if (state === 'failed') {
-      root.textContent = renderFailed('peer connection failed');
+      clearTimeout(connectTimer);
+      root.textContent = describeFailure(report.facts());
     }
   });
 
   // B1: wire mux-ready AFTER data channel is open (not on SW claim)
   conn.onmux((mux) => {
+    report.reach('relay-ready');
     wireRelayBridge(mux, conn, sessionCode);
     // Exposed for ws-shim.ts, which runs in the tunneled-app iframe and
     // reaches this OUTER window directly (same-origin `window.parent`) since
@@ -171,6 +301,38 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 interface PostPinBuffer {
   readonly events: MessageEvent[];
   stop(): void;
+}
+
+/**
+ * Hand the PIN to the signaling socket, tolerating a socket that has not
+ * finished connecting yet — the form is on screen before the WebSocket opens,
+ * so a fast typist (or an automated client) can submit during CONNECTING,
+ * where send() throws InvalidStateError.
+ *
+ * Returns true once the PIN is either sent or committed to be sent on open,
+ * false if the socket is already gone and the caller should stay retryable.
+ */
+export function submitPin(ws: WebSocket, rawPin: string): boolean {
+  const message = JSON.stringify({ type: 'pin', value: rawPin });
+  if (ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(message);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (ws.readyState === WebSocket.CONNECTING) {
+    ws.addEventListener('open', () => {
+      try {
+        ws.send(message);
+      } catch {
+        // The close handler already drives the failure path from here.
+      }
+    }, { once: true });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -203,10 +365,13 @@ async function requestPinVerification(ws: WebSocket, root: HTMLElement): Promise
       form.addEventListener('submit', (e) => {
         e.preventDefault();
         if (sent) return;
-        sent = true;
         const raw = input.value.replace(/\s/g, '');
-// console.log(`[VIEWER-BOOT] submitting PIN (${String(raw.length)} chars)`);
-        ws.send(JSON.stringify({ type: 'pin', value: raw }));
+        // Latch ONLY on a successful hand-off. The PIN form is visible as
+        // soon as the page renders, which can be before the signaling socket
+        // finishes connecting; sending then throws InvalidStateError. Latching
+        // first (as this did) left the user permanently stuck on the PIN
+        // screen — the guard blocked every retry while nothing had been sent.
+        sent = submitPin(ws, raw);
       });
     }
 
@@ -329,14 +494,16 @@ function wireRelayBridge(mux: StreamMultiplexer, conn: ViewerConnection, session
 
       const unsubscribe = mux.onInbound((frame) => {
         if (frame.streamId !== streamId) return;
-// console.log(`[PAGE] inbound frame sid=${String(streamId)} type=${String(frame.type)}`);
         const encoded = encodeFrame(frame);
         const sw = navigator.serviceWorker.controller;
         if (sw) {
           sw.postMessage(serializeSwMessage({ type: 'relay-response', streamId, data: encoded }));
-        } else {
-// console.log(`[PAGE] WARN controller null — relay-response dropped sid=${String(streamId)}`);
         }
+        // This page forwards response bytes to the service worker and retains
+        // nothing, so the mux must stop counting them against the stream's
+        // buffer cap. Without this, the cap measured the response's TOTAL size
+        // and killed any response over 1 MiB mid-body (see releaseInbound).
+        mux.releaseInbound(frame);
         if (frame.type === 6 /* RESPONSE_END */ || frame.type === 7 /* ERROR */) {
           unsubscribe();
           listeningStreams.delete(streamId);

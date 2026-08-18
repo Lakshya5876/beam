@@ -78,6 +78,37 @@ export interface SignalingClient {
   registerPin(hash: string): Promise<Result<undefined, SignalingNotConnectedError>>;
 }
 
+/**
+ * One ICE server, in Beam's own terms — deliberately RTCIceServer-compatible
+ * so it needs no translation at the browser end, but owned here so neither a
+ * TURN provider's response shape nor node-datachannel's config type leaks
+ * across a layer boundary. Credentials stay in separate fields rather than
+ * being packed into the URL: a provider-generated password may contain ':'
+ * or '@', which the `turn:user:pass@host:port` form cannot represent
+ * unambiguously.
+ */
+export interface IceServerConfig {
+  readonly urls: string;
+  readonly username?: string;
+  readonly credential?: string;
+}
+
+export interface IceConfigFetchError {
+  readonly error: 'IceConfigFetchFailed';
+  readonly reason: string;
+}
+
+/**
+ * Fetches the ICE servers both peers should use (GET /ice-config on the
+ * signaling origin). The host needs this for the same reason the viewer does:
+ * TURN credentials are minted server-side and are short-lived, so neither end
+ * can have them compiled in. A failure here is NOT fatal — the caller falls
+ * back to its configured/default STUN and still attempts a direct connection.
+ */
+export interface IceConfigClient {
+  fetchIceServers(signalingUrl: string): Promise<Result<readonly IceServerConfig[], IceConfigFetchError>>;
+}
+
 export interface ReplayRequest {
   readonly method: string;
   readonly path: string;

@@ -19,6 +19,8 @@ import {
   isIpv6Candidate,
   isPeerSignalingError,
   PeerConnectionTransport,
+  toNativeIceServer,
+  toNativeIceServers,
   type NativeDataChannel,
   type NativePeerConnection,
 } from '../../src/infrastructure/peer-connection.js';
@@ -538,5 +540,104 @@ describe('isIpv6Candidate / ipv4-only filtering', () => {
     fake.emitLocalCandidate('a=candidate:2 1 UDP 211 2401:4900::1 599 typ host', '0');
     fake.emitLocalCandidate('a=candidate:1 1 UDP 211 192.168.1.21 599 typ host', '0');
     expect(seen).toEqual(['a=candidate:1 1 UDP 211 192.168.1.21 599 typ host']);
+  });
+});
+
+describe('toNativeIceServer — domain ICE config to node-datachannel form', () => {
+  it('converts a STUN entry without credentials', () => {
+    expect(toNativeIceServer({ urls: 'stun:stun.example.com:3478' })).toEqual({
+      hostname: 'stun.example.com',
+      port: 3478,
+    });
+  });
+
+  it('carries TURN credentials as separate fields, never packed into the url', () => {
+    // A minted password may legitimately contain ':' and '@', which the
+    // turn:user:pass@host:port form cannot express unambiguously.
+    expect(
+      toNativeIceServer({ urls: 'turn:relay.example.com:80', username: 'user', credential: 'p@ss:word' }),
+    ).toEqual({
+      hostname: 'relay.example.com',
+      port: 80,
+      username: 'user',
+      password: 'p@ss:word',
+      relayType: 'TurnUdp',
+    });
+  });
+
+  it('maps the relay type from scheme and transport', () => {
+    const creds = { username: 'u', credential: 'c' };
+    expect(toNativeIceServer({ urls: 'turn:h:80', ...creds })?.relayType).toBe('TurnUdp');
+    expect(toNativeIceServer({ urls: 'turn:h:80?transport=tcp', ...creds })?.relayType).toBe('TurnTcp');
+    expect(toNativeIceServer({ urls: 'turns:h:443?transport=tcp', ...creds })?.relayType).toBe('TurnTls');
+  });
+
+  it('drops a TURN entry missing credentials rather than passing it natively', () => {
+    expect(toNativeIceServer({ urls: 'turn:relay.example.com:80' })).toBeNull();
+    expect(toNativeIceServer({ urls: 'turn:relay.example.com:80', username: 'u' })).toBeNull();
+  });
+
+  it('drops an unparseable url', () => {
+    expect(toNativeIceServer({ urls: 'nonsense' })).toBeNull();
+  });
+
+  it('filters unusable entries out of a list instead of failing the whole set', () => {
+    const converted = toNativeIceServers([
+      { urls: 'stun:a.example.com:3478' },
+      { urls: 'turn:b.example.com:80' },
+      { urls: 'turn:c.example.com:80', username: 'u', credential: 'c' },
+    ]);
+    expect(converted.map((s) => s.hostname)).toEqual(['a.example.com', 'c.example.com']);
+  });
+});
+
+describe('PeerConnectionTransport ICE configuration', () => {
+  it('passes converted ice servers and defaults the transport policy to all', () => {
+    const fake = new FakePeerConnection();
+    let received: { iceServers: unknown[]; iceTransportPolicy?: string } | null = null;
+    new PeerConnectionTransport({
+      role: 'offer',
+      iceServers: [
+        { urls: 'stun:s.example.com:3478' },
+        { urls: 'turn:t.example.com:80', username: 'u', credential: 'c' },
+      ],
+      factory: (options) => {
+        received = options;
+        return fake;
+      },
+    });
+    expect(received!.iceServers).toEqual([
+      { hostname: 's.example.com', port: 3478 },
+      { hostname: 't.example.com', port: 80, username: 'u', password: 'c', relayType: 'TurnUdp' },
+    ]);
+    // Absent, so ICE tries direct pairs first and relays only as fallback.
+    expect(received!.iceTransportPolicy).toBeUndefined();
+  });
+
+  it('forwards an explicit relay-only policy for verification runs', () => {
+    const fake = new FakePeerConnection();
+    let received: { iceTransportPolicy?: string } | null = null;
+    new PeerConnectionTransport({
+      role: 'offer',
+      iceTransportPolicy: 'relay',
+      factory: (options) => {
+        received = options;
+        return fake;
+      },
+    });
+    expect(received!.iceTransportPolicy).toBe('relay');
+  });
+
+  it('falls back to the default STUN server when none are configured', () => {
+    const fake = new FakePeerConnection();
+    let received: { iceServers: unknown[] } | null = null;
+    new PeerConnectionTransport({
+      role: 'offer',
+      factory: (options) => {
+        received = options;
+        return fake;
+      },
+    });
+    expect(received!.iceServers).toEqual([{ hostname: 'stun.l.google.com', port: 19302 }]);
   });
 });

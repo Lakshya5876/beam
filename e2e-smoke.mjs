@@ -12,12 +12,11 @@
 
 import http from 'node:http';
 import puppeteer from 'puppeteer-core';
-import { CHROME, enterPinAndConnect, startHost, startSignaling, startViewerServer } from './e2e-lib.mjs';
+import { enterPinAndConnect, freePort, resolveBrowser, startHost, startSignaling, startViewerServer } from './e2e-lib.mjs';
 
-const SP = 8081; const VP = 8788; const DP = 3000;
 const MAGIC = 'BEAM_SMOKE_OK_1234';
 
-function startDummy() {
+function startDummy(DP) {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       console.log(`  [DUMMY] ${req.method} ${req.url}`);
@@ -34,8 +33,11 @@ async function main() {
 
   try {
     console.log('[SMOKE] starting stack…');
+    // Fresh ports: fixed ones (8788 especially, the Pages dev default)
+    // collide with any unrelated local server and fail before Beam runs.
+    const [SP, VP, DP] = [await freePort(), await freePort(), await freePort()];
     const viewerSrv = await startViewerServer(VP); cleanup.push(() => viewerSrv.close());
-    const dummySrv = await startDummy();           cleanup.push(() => dummySrv.close());
+    const dummySrv = await startDummy(DP);         cleanup.push(() => dummySrv.close());
     const wr = await startSignaling(SP);           cleanup.push(() => { try { wr.kill(); } catch {} });
     await new Promise((r) => setTimeout(r, 3000)); // wrangler DO warm-up
 
@@ -49,7 +51,7 @@ async function main() {
     console.log(`[SMOKE] session URL: ${host.url} pin: ${host.pin}`);
 
     const browser = await puppeteer.launch({
-      executablePath: CHROME,
+      executablePath: resolveBrowser(),
       headless: true,
       protocolTimeout: 60000,
       args: ['--no-sandbox', '--disable-features=WebRtcHideLocalIpsWithMdns'],

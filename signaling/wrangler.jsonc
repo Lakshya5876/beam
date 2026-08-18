@@ -16,6 +16,20 @@
   // array of RTCIceServer objects served publicly at GET /ice-config; do NOT
   // put long-lived TURN credentials here (use short-lived creds — see
   // docs/deploy/CLOUDFLARE_SETUP.md).
+  //
+  // TURN (optional, but strongly recommended — without it a session cannot
+  // fall back to a relay and will fail on symmetric-NAT/CGNAT networks):
+  //   METERED_APP_NAME  — the <app> in https://<app>.metered.live. Not a
+  //                       secret; set it here.
+  //   METERED_SECRET_KEY— provider secret. NEVER put it in this file; it is
+  //                       a Worker SECRET:
+  //                         npx wrangler secret put METERED_SECRET_KEY
+  //                       It is used only in server-to-server calls; clients
+  //                       receive short-lived minted credentials, never this.
+  //   TURN_TTL_SECONDS  — optional lifetime of a minted credential (default
+  //                       14400 = 4h).
+  // With none of these set the deployment is STUN-only: direct P2P still
+  // works, and GET /ice-config reports `x-beam-turn: not-configured`.
   "vars": {
     "ICE_SERVERS": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
     "MINT_MAX_PER_MINUTE": "30",

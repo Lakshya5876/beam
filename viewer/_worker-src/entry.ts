@@ -8,14 +8,13 @@
  * fallback that a standalone Worker doesn't need.
  */
 import { routeRequest } from '../../signaling/src/router.js';
-import { iceConfigBody } from '../../signaling/src/ice-config.js';
+import { handleIceConfig, type TurnEnv } from '../../signaling/src/ice-config-route.js';
 import type { SessionPolicyEnv } from '../../signaling/src/session-do.js';
 
 export { SessionDurableObject } from '../../signaling/src/session-do.js';
 
-interface Env extends SessionPolicyEnv {
+interface Env extends SessionPolicyEnv, TurnEnv {
   SESSIONS: DurableObjectNamespace;
-  ICE_SERVERS?: string;
   ASSETS: { fetch(request: Request): Promise<Response> };
 }
 
@@ -31,13 +30,9 @@ export default {
       return env.ASSETS.fetch(request);
     }
     if (decision.kind === 'ice-config') {
-      return new Response(iceConfigBody(env.ICE_SERVERS), {
-        headers: {
-          'content-type': 'application/json',
-          'access-control-allow-origin': '*',
-          'cache-control': 'no-store',
-        },
-      });
+      // Same handler the standalone signaling Worker uses — both peers must
+      // receive identical ICE configuration (ice-config-route.ts).
+      return handleIceConfig(env, fetch, Date.now());
     }
     const name = decision.kind === 'mint' ? REGISTRY_NAME : decision.code;
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(name));

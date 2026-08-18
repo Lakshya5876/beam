@@ -8,10 +8,12 @@
  * send loop. All concretions are instantiated ONLY in `realFactories`.
  */
 
-import { loadConfig, type BeamConfig } from './config.js';
+import { loadConfig, type BeamConfig, type IceTransportPolicy } from './config.js';
 import { FrameType, type Frame, type StreamId } from './domain/frame.js';
 import {
   ok,
+  type IceConfigClient,
+  type IceServerConfig,
   type PeerTransport,
   type ReplayClient,
   type RequestLogRepository,
@@ -26,6 +28,8 @@ import { InMemoryRequestLogStore } from './infrastructure/request-log-store.js';
 import { LoopbackReplayClient } from './infrastructure/replay-client.js';
 import { LoopbackWsRelayClient } from './infrastructure/ws-relay-client.js';
 import { WebSocketSignalingClient } from './infrastructure/signaling-client.js';
+import { HttpIceConfigClient } from './infrastructure/ice-config-client.js';
+import { hasRelayServer, mergeIceServers } from './application/ice-servers.js';
 import {
   initNativeLogging,
   PeerConnectionTransport,
@@ -69,8 +73,9 @@ export interface ConnectablePeer extends PeerTransport {
 
 export interface PeerCreationOptions {
   readonly log?: (msg: string) => void;
-  readonly iceServers?: readonly string[];
+  readonly iceServers?: readonly IceServerConfig[];
   readonly ipv4Only?: boolean;
+  readonly iceTransportPolicy?: IceTransportPolicy;
 }
 
 export interface HostFactories {
@@ -78,6 +83,7 @@ export interface HostFactories {
   createReplayClient(localPort: number): ReplayClient;
   createWsRelayClient(localPort: number): WsRelayClient;
   createSignalingClient(signalingUrl: string, log?: (msg: string) => void): SignalingClient;
+  createIceConfigClient(log?: (msg: string) => void): IceConfigClient;
   createPeer(options?: PeerCreationOptions): ConnectablePeer;
 }
 
@@ -87,14 +93,41 @@ export const realFactories: HostFactories = {
   createReplayClient: (localPort) => new LoopbackReplayClient(localPort),
   createWsRelayClient: (localPort) => new LoopbackWsRelayClient(localPort),
   createSignalingClient: (signalingUrl, log) => new WebSocketSignalingClient(signalingUrl, undefined, undefined, log),
+  createIceConfigClient: (log) => new HttpIceConfigClient(undefined, undefined, log),
   createPeer: (options = {}) =>
     new PeerConnectionTransport({
       role: 'offer',
       ...(options.log !== undefined && { log: options.log }),
-      ...(options.iceServers !== undefined && { iceServers: [...options.iceServers] }),
+      ...(options.iceServers !== undefined && { iceServers: options.iceServers }),
       ...(options.ipv4Only === true && { ipv4Only: true }),
+      ...(options.iceTransportPolicy !== undefined && { iceTransportPolicy: options.iceTransportPolicy }),
     }),
 };
+
+/**
+ * Assemble the host's ICE servers: anything pinned via BEAM_ICE_SERVERS/--ice
+ * first, then whatever the signaling origin serves at /ice-config (which is
+ * where minted TURN credentials come from). Merged rather than either/or, so
+ * pinning a self-hosted STUN does not silently discard TURN.
+ *
+ * A fetch failure is logged and ignored — the host proceeds with what it has
+ * and still attempts a direct connection.
+ */
+export async function resolveHostIceServers(
+  client: IceConfigClient,
+  signalingUrl: string,
+  configured: readonly IceServerConfig[] | undefined,
+  log: (msg: string) => void,
+): Promise<readonly IceServerConfig[] | undefined> {
+  const fetched = await client.fetchIceServers(signalingUrl);
+  if (!fetched.ok) {
+    log(`[HOST-ICE] ${fetched.error.reason} — continuing with configured/default ICE servers`);
+    return configured;
+  }
+  const merged = mergeIceServers(configured ?? [], fetched.value);
+  log(`[HOST-ICE] ${String(merged.length)} ice server(s), relay=${String(hasRelayServer(merged))}`);
+  return merged;
+}
 
 function parseRemoteCandidate(payload: string): { candidate: string; mid: string } | null {
   try {
@@ -344,7 +377,9 @@ export interface HostOptions {
   readonly ttlMs?: number;
   readonly now?: () => number;
   readonly debug?: boolean;
-  readonly iceServers?: readonly string[];
+  readonly iceServers?: readonly IceServerConfig[];
+  /** 'relay' forces TURN; verification/diagnosis only (see config.ts). */
+  readonly iceTransportPolicy?: IceTransportPolicy;
   /** Debug sink; when set with debug, overrides the default stderr writer
    *  (the CLI injects a timestamped timeline logger). */
   readonly log?: (msg: string) => void;
@@ -362,9 +397,41 @@ export interface HostRuntime {
   readonly diagnostics: QueryDiagnosticsUseCase;
 }
 
+/**
+ * Resolve the host's ICE servers before composing the runtime. Separate from
+ * composeHost because it is async and composeHost must stay synchronous (it
+ * wires signal handlers onto the peer at construction); the CLI awaits this,
+ * then passes the result in as HostOptions.iceServers.
+ */
+export function composeHostIceServers(
+  signalingUrl: string,
+  configured: readonly IceServerConfig[] | undefined,
+  log: (msg: string) => void = () => { /* noop */ },
+  factories: HostFactories = realFactories,
+): Promise<readonly IceServerConfig[] | undefined> {
+  return resolveHostIceServers(factories.createIceConfigClient(log), signalingUrl, configured, log);
+}
+
+/** Debug sink: the CLI's timestamped logger when given, else stderr. */
+function hostLogger(options: HostOptions): ((msg: string) => void) | undefined {
+  if (options.debug !== true) {
+    return undefined;
+  }
+  return options.log ?? ((msg: string): void => { process.stderr.write(`${msg}\n`); });
+}
+
+function peerOptionsFor(options: HostOptions, log: ((msg: string) => void) | undefined): PeerCreationOptions {
+  return {
+    ...(log !== undefined && { log }),
+    ...(options.iceServers !== undefined && { iceServers: options.iceServers }),
+    ...(options.ipv4Only === true && { ipv4Only: true }),
+    ...(options.iceTransportPolicy !== undefined && { iceTransportPolicy: options.iceTransportPolicy }),
+  };
+}
+
 export function composeHost(options: HostOptions, factories: HostFactories = realFactories): HostRuntime {
   const now = options.now ?? ((): number => Date.now());
-  const log = options.debug ? options.log ?? ((msg: string): void => { process.stderr.write(`${msg}\n`); }) : undefined;
+  const log = hostLogger(options);
   if (options.nativeLogLevel !== undefined) {
     initNativeLogging(options.nativeLogLevel);
   }
@@ -372,11 +439,7 @@ export function composeHost(options: HostOptions, factories: HostFactories = rea
   const replayClient = factories.createReplayClient(options.localPort);
   const wsRelayClient = factories.createWsRelayClient(options.localPort);
   const signaling = factories.createSignalingClient(options.signalingUrl, log);
-  const peer = factories.createPeer({
-    ...(log !== undefined && { log }),
-    ...(options.iceServers !== undefined && { iceServers: options.iceServers }),
-    ...(options.ipv4Only === true && { ipv4Only: true }),
-  });
+  const peer = factories.createPeer(peerOptionsFor(options, log));
   const mux = new StreamMultiplexer(peer);
   const relay = new ExecuteRelayUseCase(replayClient);
   const recorder = new RecordRequestUseCase(logStore, now);
