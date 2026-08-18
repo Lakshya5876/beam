@@ -15,7 +15,7 @@ bm http://localhost:3000
   Share both with your viewer. Press Ctrl-C to end the session.
 ```
 
-The viewer opens the URL in Chrome, enters the 6-digit code, and from that point every HTTP request they make is forwarded — peer-to-peer — to your local server and back.
+The viewer opens the URL in a Chromium-based browser (Chrome, Edge — see Platform support below), enters the 6-digit code, and from that point every HTTP request they make is forwarded — peer-to-peer — to your local server and back, on their own machine, as if they were on yours.
 
 ---
 
@@ -40,6 +40,31 @@ Your local server
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full design walkthrough.
 
 ---
+
+## Platform support
+
+**Host: Windows only, for now.** Beam has not been built, tested, or verified
+on macOS or Linux in this release — treat those as unsupported rather than
+assumed-working, even though nothing in the architecture is Windows-specific
+by design.
+
+**Viewer: Chromium-based browsers only** (Chrome, Edge, and other
+Chromium-family browsers, on any OS). Confirmed working end-to-end on real
+hardware across a real cross-device, cross-network connection: Windows host →
+Android Chrome viewer on mobile data. Automated coverage (`e2e-app-compat.mjs`)
+additionally verifies the full request/response surface on Chrome and Edge on
+Windows.
+
+**Does not currently work: WebKit-based browsers** — this means Safari on any
+platform, and **every** browser on iOS/iPadOS (Apple requires all iOS browsers,
+including Chrome and Firefox for iOS, to use WebKit underneath). Confirmed via
+a real device test: the WebRTC connection itself succeeds
+(`DataChannel OPEN`), but the page never loads — WebKit has a known gap in
+Service-Worker interception of iframe navigation, which the viewer's
+architecture depends on. This is a real, verified limitation, not a guess;
+see LIMITATIONS.md for the mechanism.
+
+Firefox has not been tested in this release.
 
 ## Installation
 
@@ -142,7 +167,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
 - **TURN relay must be configured per deployment** — Beam prefers a direct peer-to-peer path and falls back to a TURN relay automatically when ICE cannot find one (symmetric NAT, CGNAT). The fallback only exists if the deployment supplies TURN credentials; without them the deployment is STUN-only and still fails on those networks. Setup is in `docs/deploy/CLOUDFLARE_SETUP.md`. Verified against a live Metered account: `path=direct` on a normal network, `path=relay` when forced through the relay (real HTTP request relayed through it), and a deterministic failure when neither is available — see LIMITATIONS.md.
 - **WebSocket relay has caveats** — supported (HMR, chat, realtime apps all work), but the browser's `WebSocket` API doesn't expose cookies as headers, so the loopback WS handshake doesn't carry the browser's cookies. Apps that gate a WS connection on cookie session auth won't authenticate over the relay.
 - **HTML shim injection is skipped for compressed responses** — a `Content-Encoding: gzip/br/deflate` HTML response is relayed byte-for-byte unmodified (correctly), but without the WebSocket shim, so `new WebSocket()` calls on that page won't be relayed.
-- **Verified on Chromium browsers only** — the full workflow (signaling → PIN → ICE → DataChannel → service-worker relay → localhost request/response) is verified end-to-end on Chrome and Edge on Windows, via `e2e-app-compat.mjs`. The viewer uses only standard APIs (no Chromium-specific ones), but Firefox, Safari, and macOS hosts have **not** been run against this suite here, so they are not claimed as supported. Run `node e2e-app-compat.mjs` on those platforms to establish it.
+- **Windows-only host, Chromium-only viewer, for now** — see "Platform support" above for exactly what is and isn't verified, including the WebKit/iOS gap found via real device testing.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full details.
 

@@ -1,5 +1,48 @@
 # Beam v1 — Known Limitations
 
+## Platform scope: Windows host, Chromium viewer, for now
+
+**Host**: Windows only. Nothing in the architecture is Windows-specific by
+design (the native WebRTC layer, node-datachannel, ships prebuilt binaries
+for macOS and Linux too), but macOS and Linux hosts have not been built,
+run, or verified in this release. Treat them as unsupported, not
+assumed-working.
+
+**Viewer**: Chromium-based browsers (Chrome, Edge, and the Chromium family)
+on any OS. Verified two ways: automated (`e2e-app-compat.mjs`, Chrome and
+Edge on Windows) and on real hardware across a real cross-device,
+cross-network connection (Windows host, Android Chrome viewer on mobile
+data — see "WebKit-based browsers do not currently work" below for the
+device this was cross-checked against).
+
+## WebKit-based browsers do not currently work (Safari, all of iOS)
+
+This means Safari on any platform, and **every** browser on iOS/iPadOS —
+Apple requires all iOS browsers, including Chrome and Firefox for iOS, to
+use WebKit underneath rather than their own engine, so "Chrome on iPhone" is
+WebKit wearing a Chrome skin, not Chromium.
+
+Confirmed via a real device test (iPhone, opened via Chrome for iOS), not
+inferred: the underlying WebRTC connection succeeds completely — ICE
+negotiates, `DataChannel OPEN` fires, `peerState=connected` — but the
+tunneled page never renders. Cross-checked on the same host session against
+a genuine Chromium browser (Android Chrome, different device, same host),
+which worked immediately. The failure is isolated to the relay layer, not
+WebRTC: zero request frames ever reach the host after the DataChannel opens,
+meaning the iframe's navigation request never reaches the service worker
+pipeline at all.
+
+The suspected mechanism (not yet root-caused to a specific line, since
+remote iOS debugging wasn't available): WebKit has documented, longstanding
+gaps in Service Worker interception of iframe navigation requests, an area
+where its behavior diverges from Chromium's. The viewer's whole architecture
+depends on exactly that interception (see "The iframe-shell architecture"
+below) — the outer shell embeds the tunneled app in an iframe and relies on
+the service worker to intercept the iframe's own navigation to relay it over
+the DataChannel.
+
+Firefox has not been tested in this release, on any platform.
+
 ## The iframe-shell architecture (how full navigation works, and where it doesn't)
 
 The viewer page is a thin **outer shell**: it holds the RTCPeerConnection, the

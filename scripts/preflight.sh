@@ -25,6 +25,7 @@ npm run build >/dev/null 2>&1                 && ok "CLI build (dist/)"      || 
                                               && ok "cli.js shebang"         || bad "dist/presentation/cli.js missing or no shebang"
 ( cd viewer && npm run build >/dev/null 2>&1 ) && ok "viewer build"          || bad "viewer build"
 [ -f viewer/dist/__beam/sw.js ]               && ok "SW at dist/__beam/sw.js" || bad "viewer/dist/__beam/sw.js missing"
+[ -f viewer/dist/_worker.js ]                 && ok "merged worker at dist/_worker.js" || bad "viewer/dist/_worker.js missing (Pages would deploy as static-only, no merged signaling origin)"
 [ -f viewer/dist/_headers ] && grep -q 'Service-Worker-Allowed' viewer/dist/_headers \
                                               && ok "_headers ships SW-Allowed" || bad "viewer/dist/_headers missing Service-Worker-Allowed"
 grep -q 'beam-root' viewer/dist/index.html 2>/dev/null \

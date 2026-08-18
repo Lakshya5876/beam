@@ -7,7 +7,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "vite build"
+    "build": "vite build && npm run build:worker",
+    "build:worker": "npx esbuild _worker-src/entry.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=dist/_worker.js"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "4.1.8",

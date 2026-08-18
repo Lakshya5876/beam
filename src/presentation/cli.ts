@@ -32,12 +32,17 @@ function pErr<T>(error: CliUsageError): Parsed<T> {
 export type CliParseResult = Parsed<CliOptions>;
 
 /**
- * Compiled-in fallbacks. PLACEHOLDER-DEFAULT: these are NOT live endpoints —
- * the release checklist (docs/deploy/RELEASE_CHECKLIST.md) requires replacing
- * them with the real deployed URLs before `npm publish`. Resolution order at
- * runtime: CLI flag > BEAM_SIGNALING_URL / BEAM_VIEWER_URL env > these.
+ * Compiled-in fallbacks — the real, deployed, verified-working endpoints, so
+ * `bm <port>` with zero flags works out of the box (the non-negotiable "user
+ * runs a command" UX). Both point at the SAME origin deliberately: the
+ * merged Pages Advanced-Mode worker (viewer/_worker-src/entry.ts) serves
+ * signaling from the same origin as the static viewer bundle, which is what
+ * makes the WebSocket upgrade reach a *.pages.dev domain instead of a
+ * separate *.workers.dev one — some mobile carriers were observed blocking
+ * the latter (see LIMITATIONS.md). Resolution order at runtime: CLI flag >
+ * BEAM_SIGNALING_URL / BEAM_VIEWER_URL env > these.
  */
-export const DEFAULT_SIGNALING_URL = 'wss://signal.beam.workers.dev';
+export const DEFAULT_SIGNALING_URL = 'wss://beam-viewer.pages.dev';
 export const DEFAULT_VIEWER_URL = 'https://beam-viewer.pages.dev';
 
 export const USAGE =
