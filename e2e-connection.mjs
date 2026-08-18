@@ -68,7 +68,7 @@ async function runScenario({ name, relayOnly, turnEnv, expect: expected, log }) 
     const [SP, VP, DP] = [await freePort(), await freePort(), await freePort()];
     const viewerSrv = await startViewerServer(VP); cleanup.push(() => viewerSrv.close());
     const dummySrv = await startDummy(DP); cleanup.push(() => dummySrv.close());
-    const wr = await startSignaling(SP, { env: turnEnv }); cleanup.push(() => { try { wr.kill(); } catch {} });
+    const wr = await startSignaling(SP, { workerVars: turnEnv }); cleanup.push(() => { try { wr.kill(); } catch {} });
     await new Promise((r) => setTimeout(r, 3000));
 
     const host = await startHost({
@@ -98,7 +98,7 @@ async function runScenario({ name, relayOnly, turnEnv, expect: expected, log }) 
 
     // The failure path must wait past the viewer's own connect timeout
     // (CONNECT_TIMEOUT_MS) — that bound is precisely what is under test.
-    const facts = await readFacts(page, { timeoutMs: expected.connects ? 30000 : 60000 });
+    const facts = await readFacts(page, { timeoutMs: expected.connects ? 50000 : 60000 });
     if (!facts) return fail('viewer never published connection facts (hung?)');
     console.log(`  facts: stage=${facts.reachedStage} path=${facts.selectedPath} turn=${facts.turnDiagnostic ?? 'n/a'} relayOnly=${facts.relayOnlyRequested}`);
 

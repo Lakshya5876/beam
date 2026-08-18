@@ -9,6 +9,8 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
+import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -116,12 +118,34 @@ export function binPath(relativeDir, name) {
 }
 
 /** Local signaling worker via `wrangler dev --local` (no cloud resources). */
-export function startSignaling(port, { log = () => {}, env: extraEnv = {} } = {}) {
+export function startSignaling(port, { log = () => {}, workerVars = {} } = {}) {
   return new Promise((resolve, reject) => {
+    // Worker bindings (env.FOO in the Worker) are NOT the same thing as the
+    // wrangler CLI process's own environment — `wrangler dev` does not
+    // forward its own process.env into the simulated Worker's env object.
+    // Cloudflare's own local-dev mechanism for this is a `.dev.vars`-style
+    // file read via --env-file. Written OUTSIDE the repo (os.tmpdir(), a
+    // random name) so a secret passed as a workerVar never touches a
+    // tracked path or needs a .gitignore entry, and deleted the moment the
+    // signaling process is torn down.
+    const extraArgs = [];
+    let envFilePath = null;
+    if (Object.keys(workerVars).length > 0) {
+      envFilePath = path.join(os.tmpdir(), `beam-e2e-${crypto.randomBytes(8).toString('hex')}.vars`);
+      const contents = Object.entries(workerVars).map(([k, v]) => `${k}=${v}`).join(String.fromCharCode(10)) + String.fromCharCode(10);
+      fs.writeFileSync(envFilePath, contents, { encoding: 'utf8', mode: 0o600 });
+      extraArgs.push('--env-file', envFilePath);
+    }
+    const cleanupEnvFile = () => {
+      if (envFilePath) {
+        try { fs.unlinkSync(envFilePath); } catch { /* already gone */ }
+      }
+    };
+
     const wrangler = spawn(
       binPath('signaling/node_modules', 'wrangler'),
-      ['dev', '--config', path.join(ROOT, 'signaling/wrangler.jsonc'), '--port', String(port), '--local', '--log-level', 'warn'],
-      { cwd: ROOT, env: { ...process.env, NO_COLOR: '1', ...extraEnv }, shell: process.platform === 'win32' },
+      ['dev', '--config', path.join(ROOT, 'signaling/wrangler.jsonc'), '--port', String(port), '--local', '--log-level', 'warn', ...extraArgs],
+      { cwd: ROOT, env: { ...process.env, NO_COLOR: '1' }, shell: process.platform === 'win32' },
     );
     // `wrangler` is a shim that forks the real worker process. On Windows
     // ChildProcess.kill() reaps only the shim, leaving the worker LISTENING on
@@ -130,8 +154,12 @@ export function startSignaling(port, { log = () => {}, env: extraEnv = {} } = {}
     if (process.platform === 'win32') {
       wrangler.kill = () => {
         try { spawn('taskkill', ['/pid', String(wrangler.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
+        cleanupEnvFile();
         return true;
       };
+    } else {
+      const originalKill = wrangler.kill.bind(wrangler);
+      wrangler.kill = (...args) => { cleanupEnvFile(); return originalKill(...args); };
     }
     let ready = false;
     const onData = (chunk) => {

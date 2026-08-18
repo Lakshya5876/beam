@@ -32,6 +32,7 @@
   // works, and GET /ice-config reports `x-beam-turn: not-configured`.
   "vars": {
     "ICE_SERVERS": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
+    "METERED_APP_NAME": "beam-lex",
     "MINT_MAX_PER_MINUTE": "30",
     "PIN_MAX_ATTEMPTS": "3"
   }

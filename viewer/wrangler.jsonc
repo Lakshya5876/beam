@@ -26,6 +26,7 @@
   //   npx wrangler pages secret put METERED_SECRET_KEY
   "vars": {
     "ICE_SERVERS": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
+    "METERED_APP_NAME": "beam-lex",
     "MINT_MAX_PER_MINUTE": "30",
     "PIN_MAX_ATTEMPTS": "3"
   }
