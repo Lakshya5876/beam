@@ -8,10 +8,12 @@ import { parseSessionCodeFromUrl } from './url.js';
 
 export const MINT_PATH = '/new';
 export const ICE_CONFIG_PATH = '/ice-config';
+export const TELEMETRY_PATH = '/telemetry';
 
 export type RouteDecision =
   | { readonly kind: 'mint' }
   | { readonly kind: 'ice-config' }
+  | { readonly kind: 'telemetry' }
   | { readonly kind: 'pair'; readonly code: string }
   | { readonly kind: 'reject'; readonly status: number; readonly reason: string };
 
@@ -33,6 +35,12 @@ export function routeRequest(method: string, url: string, isWebSocketUpgrade: bo
       return { kind: 'reject', status: 405, reason: 'ice-config-requires-get' };
     }
     return { kind: 'ice-config' };
+  }
+  if (pathname === TELEMETRY_PATH) {
+    if (method !== 'POST') {
+      return { kind: 'reject', status: 405, reason: 'telemetry-requires-post' };
+    }
+    return { kind: 'telemetry' };
   }
   if (!isWebSocketUpgrade) {
     return { kind: 'reject', status: 426, reason: 'expected-websocket-upgrade' };

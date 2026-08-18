@@ -43,3 +43,17 @@ describe('routeRequest — /ice-config', () => {
     });
   });
 });
+
+describe('routeRequest — /telemetry', () => {
+  it('routes POST /telemetry as telemetry', () => {
+    expect(routeRequest('POST', `${BASE}/telemetry`, false)).toEqual({ kind: 'telemetry' });
+  });
+
+  it('rejects non-POST /telemetry with 405', () => {
+    expect(routeRequest('GET', `${BASE}/telemetry`, false)).toEqual({
+      kind: 'reject',
+      status: 405,
+      reason: 'telemetry-requires-post',
+    });
+  });
+});

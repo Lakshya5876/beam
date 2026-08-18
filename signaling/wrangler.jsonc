@@ -11,6 +11,16 @@
     "bindings": [{ "name": "SESSIONS", "class_name": "SessionDurableObject" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SessionDurableObject"] }],
+  // Aggregate connection-outcome telemetry (see signaling/src/telemetry.ts):
+  // one write per session — direct/relay/failed, plus a failure-diagnostic
+  // stage and whether TURN was available. No session codes, PINs, TURN
+  // credentials, request URLs, or tunneled app content ever reach this.
+  // Shared dataset name with viewer/wrangler.jsonc so both origins'
+  // writes aggregate together. Read access is manual (Cloudflare dashboard /
+  // ad-hoc SQL API query) — no query code lives in this repo.
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "beam_connection_outcomes" }
+  ],
   // Deploy-time policy knobs. All optional — the worker falls back to these
   // same defaults when a var is unset or malformed. ICE_SERVERS is a JSON
   // array of RTCIceServer objects served publicly at GET /ice-config; do NOT

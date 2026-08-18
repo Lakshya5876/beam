@@ -9,11 +9,12 @@
  */
 import { routeRequest } from '../../signaling/src/router.js';
 import { handleIceConfig, type TurnEnv } from '../../signaling/src/ice-config-route.js';
+import { handleTelemetry, type TelemetryEnv } from '../../signaling/src/telemetry-route.js';
 import type { SessionPolicyEnv } from '../../signaling/src/session-do.js';
 
 export { SessionDurableObject } from '../../signaling/src/session-do.js';
 
-interface Env extends SessionPolicyEnv, TurnEnv {
+interface Env extends SessionPolicyEnv, TurnEnv, TelemetryEnv {
   SESSIONS: DurableObjectNamespace;
   ASSETS: { fetch(request: Request): Promise<Response> };
 }
@@ -33,6 +34,9 @@ export default {
       // Same handler the standalone signaling Worker uses — both peers must
       // receive identical ICE configuration (ice-config-route.ts).
       return handleIceConfig(env, fetch, Date.now());
+    }
+    if (decision.kind === 'telemetry') {
+      return handleTelemetry(request, env);
     }
     const name = decision.kind === 'mint' ? REGISTRY_NAME : decision.code;
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(name));

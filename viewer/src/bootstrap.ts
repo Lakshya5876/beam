@@ -24,6 +24,7 @@ import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
 import { createWsBridge } from './ws-bridge.js';
+import { OutcomeReporter, outcomeForSelectedPath, telemetryUrlFor } from './telemetry.js';
 import {
   classifySelectedPath,
   ConnectionReport,
@@ -187,6 +188,21 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   const ws = new WebSocket(wsUrl);
   ws.addEventListener('open', () => { report.reach('signaling-connect'); });
 
+  // At most one outcome beacon per session (see telemetry.ts). Fire-and-
+  // forget: the request is never awaited, its response never inspected, and
+  // a failed send is swallowed here rather than surfaced — telemetry must
+  // never affect the Beam connection or the user's experience of it.
+  // keepalive lets the request survive if the page is being torn down (e.g.
+  // the connect-timeout closing the connection) right as it's sent.
+  const outcomeReporter = new OutcomeReporter((payload) => {
+    fetch(telemetryUrlFor(base), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => { /* best-effort — see class doc */ });
+  });
+
   // M3 PIN gate: show PIN form, wait for DO to confirm or lock.
   // Returns buffered post-pin-ok messages to prevent the offer-drop race.
   const buffered = await requestPinVerification(ws, root);
@@ -244,6 +260,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     if (report.transportEstablished()) {
       return;
     }
+    outcomeReporter.reportOnce('failed', report.facts());
     root.textContent = describeFailure(report.facts());
     conn.close();
   }, CONNECT_TIMEOUT_MS);
@@ -256,6 +273,10 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
       // session went direct or fell back to TURN.
       void readSelectedPath(pc).then((path) => {
         report.noteSelectedPath(path);
+        const outcome = outcomeForSelectedPath(path);
+        if (outcome) {
+          outcomeReporter.reportOnce(outcome, report.facts());
+        }
       });
       // Embed the tunneled app in an iframe rather than navigating this
       // document to it — a full navigation here would unload the
@@ -271,6 +292,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
       }
     } else if (state === 'failed') {
       clearTimeout(connectTimer);
+      outcomeReporter.reportOnce('failed', report.facts());
       root.textContent = describeFailure(report.facts());
     }
   });

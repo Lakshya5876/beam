@@ -10,13 +10,14 @@
 
 import { routeRequest } from './router.js';
 import { handleIceConfig, type TurnEnv } from './ice-config-route.js';
+import { handleTelemetry, type TelemetryEnv } from './telemetry-route.js';
 import type { SessionPolicyEnv } from './session-do.js';
 
 // The DO class must be exported from the Worker entrypoint (Cloudflare binds
 // it by class name from wrangler.jsonc).
 export { SessionDurableObject } from './session-do.js';
 
-export interface Env extends SessionPolicyEnv, TurnEnv {
+export interface Env extends SessionPolicyEnv, TurnEnv, TelemetryEnv {
   SESSIONS: DurableObjectNamespace;
 }
 
@@ -33,6 +34,9 @@ export default {
     if (decision.kind === 'ice-config') {
       // STUN always; TURN appended when configured (ice-config-route.ts).
       return handleIceConfig(env, fetch, Date.now());
+    }
+    if (decision.kind === 'telemetry') {
+      return handleTelemetry(request, env);
     }
     const name = decision.kind === 'mint' ? REGISTRY_NAME : decision.code;
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(name));

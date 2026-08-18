@@ -18,6 +18,12 @@
   "durable_objects": {
     "bindings": [{ "name": "SESSIONS", "class_name": "SessionDurableObject", "script_name": "beam-signaling" }]
   },
+  // Same dataset as signaling/wrangler.jsonc — see that file's comment and
+  // signaling/src/telemetry.ts for exactly what is (and is never) recorded.
+  // This is the origin real sessions actually hit, so most writes land here.
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "beam_connection_outcomes" }
+  ],
   // This origin serves GET /ice-config to BOTH peers (the viewer page and the
   // host CLI), so TURN must be configured HERE too — configuring it only on
   // the standalone signaling Worker leaves this origin STUN-only. Same keys
