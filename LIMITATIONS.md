@@ -46,27 +46,43 @@ per-session subdomains (a bigger infrastructure change, deferred — see
 single ongoing host+viewer pairing, only for reusing the same browser across
 unrelated sessions.
 
-## No TURN relay (fails outright on symmetric NAT / some CGNAT)
+## TURN relay: supported, but only if the deployment configures it
 
-Beam uses direct peer-to-peer ICE without a TURN relay server. Connections fail
-on symmetric NAT topologies (common on corporate firewalls) and on some carrier-
-grade NAT setups (increasingly common on mobile networks and a growing number of
-home ISPs). There is no fallback when this happens — the connection simply never
-leaves `checking`/`disconnected` and the viewer eventually shows a connection-
-failed message. This is the single biggest reliability gap for "just works for
-any two networks" and is not fixed in this release; see the Design Declaration
-in the project history for why it was explicitly deferred.
+Beam prefers a direct peer-to-peer path and falls back to a TURN relay when ICE
+cannot find one — symmetric NAT (common on corporate firewalls) and carrier-
+grade NAT (common on mobile networks and a growing number of home ISPs) are the
+cases that need the fallback. The fallback is automatic and per-connection:
+relay servers are offered alongside STUN and standard ICE candidate
+prioritization nominates a relay pair only when no direct pair passes its
+connectivity checks. Beam never routes traffic through TURN by choice.
+
+**A deployment with no TURN configured still fails on those networks.** TURN is
+opt-in per deployment because it needs a provider account; see
+`docs/deploy/CLOUDFLARE_SETUP.md`. With it unset, `GET /ice-config` reports
+`x-beam-turn: not-configured` and the viewer says so explicitly when a
+connection fails, rather than showing a generic error.
+
+Credential handling: credentials are minted server-side, per mint, and expire
+(default 4h). The long-lived provider secret is a Worker secret and never
+reaches a client. `/ice-config` is public by design — a peer needs it before it
+can prove anything about a session — which is exactly why what it serves is
+short-lived. Never put a long-lived TURN credential in the `ICE_SERVERS` var;
+it is served verbatim to anyone who asks.
+
+`BEAM_ICE_SERVERS`/`--ice` still accepts `turn:` URLs for a self-hosted coturn;
+those are merged with whatever `/ice-config` serves rather than replacing it.
 
 `--ipv4-only` (both host and viewer — see README) mitigates a *different*
 failure mode: slow or failed nomination on dual-stack networks racing IPv6
-against IPv4 candidate pairs. It does not help symmetric NAT/CGNAT; that failure
-looks identical (`iceState` never leaves `checking`/`disconnected`) but has
-no address-family workaround — only TURN fixes it. `BEAM_ICE_SERVERS`/`--ice`
-already accepts `turn:` URLs if you have your own TURN server; Beam does not
-provision one, and the signaling worker's `/ice-config` endpoint is public
-(anyone can `GET` it) so long-lived TURN credentials must never be placed
-there — use short-lived credentials or don't put TURN there at all until a
-proper credential-minting endpoint exists.
+against IPv4 candidate pairs. It does not help symmetric NAT/CGNAT.
+
+**Verification status:** the direct path and the no-relay-available failure
+path are covered by `e2e-connection.mjs`, which asserts the ICE path actually
+selected. The scenario proving TURN *carries* a working session end-to-end
+requires real provider credentials and runs only when they are supplied
+(`BEAM_E2E_TURN_APP` / `BEAM_E2E_TURN_SECRET`); it has not been run against a
+live TURN server in this repository yet, and the suite skips it loudly rather
+than reporting a pass.
 
 ## Reloading (or navigating) the OUTER viewer tab always starts a fresh connection
 

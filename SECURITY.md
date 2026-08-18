@@ -53,10 +53,31 @@ The session code is a 26-character alphanumeric string minted by the signaling D
 |-----|-----------|
 | Host → Signaling DO | WebSocket over TLS (wss://) |
 | Viewer → Signaling DO | WebSocket over TLS (wss://) |
-| Host ↔ Viewer (data) | DTLS-SRTP over WebRTC DataChannel (post-ICE, direct P2P) |
+| Host ↔ Viewer (data) | DTLS-SRTP over WebRTC DataChannel (direct P2P, or via a TURN relay when ICE cannot establish a direct path) |
 | Host → Local server | Plain HTTP to 127.0.0.1 (loopback only) |
 
 After the DataChannel is established, **zero relay traffic** passes through the signaling server. Cloudflare cannot read data-channel content.
+
+**A TURN relay cannot read it either.** When ICE falls back to a relay, DTLS
+keys are still negotiated end-to-end between the two peers; the TURN server
+forwards ciphertext it structurally cannot decrypt. Falling back to a relay
+changes the path, not the trust model.
+
+### TURN credential handling
+
+- The provider's long-lived secret is a Worker secret. It is used only in
+  server-to-server calls from the Worker and never appears in a response body,
+  a log line, or a client bundle (asserted by tests).
+- What clients receive is a per-mint credential that expires (default 4h).
+- `GET /ice-config` is unauthenticated by design — a peer needs ICE servers
+  before it can prove anything about a session. **Consequence:** anyone who can
+  reach the endpoint can obtain a short-lived TURN credential and consume relay
+  quota. This is inherent to browser WebRTC (any web app's TURN credentials are
+  equally visible to its users) and is bounded by the credential TTL and the
+  provider's own quota controls, not by Beam. Operators running a metered TURN
+  account should watch usage and shorten `TURN_TTL_SECONDS` if abused.
+- Never place a long-lived TURN credential in the `ICE_SERVERS` var: that value
+  is served verbatim to anyone who asks.
 
 ---
 

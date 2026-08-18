@@ -139,10 +139,10 @@ See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
 
 ## Limitations
 
-- **No TURN relay** — direct peer-to-peer only. Connections fail on symmetric NAT and some CGNAT setups (common on corporate networks and certain mobile/home ISPs) with no fallback. This is the biggest reliability gap for "just works for anyone" — see LIMITATIONS.md.
+- **TURN relay must be configured per deployment** — Beam prefers a direct peer-to-peer path and falls back to a TURN relay automatically when ICE cannot find one (symmetric NAT, CGNAT). The fallback only exists if the deployment supplies TURN credentials; without them the deployment is STUN-only and still fails on those networks. Setup is in `docs/deploy/CLOUDFLARE_SETUP.md`; credentials are minted server-side and expire. See LIMITATIONS.md for verification status.
 - **WebSocket relay has caveats** — supported (HMR, chat, realtime apps all work), but the browser's `WebSocket` API doesn't expose cookies as headers, so the loopback WS handshake doesn't carry the browser's cookies. Apps that gate a WS connection on cookie session auth won't authenticate over the relay.
 - **HTML shim injection is skipped for compressed responses** — a `Content-Encoding: gzip/br/deflate` HTML response is relayed byte-for-byte unmodified (correctly), but without the WebSocket shim, so `new WebSocket()` calls on that page won't be relayed.
-- **Chrome recommended** — the viewer's service worker + WebRTC combination is verified in Chromium-based browsers. Firefox and Safari have known SW/WebRTC compatibility gaps that are not independently verified here.
+- **Verified on Chromium browsers only** — the full workflow (signaling → PIN → ICE → DataChannel → service-worker relay → localhost request/response) is verified end-to-end on Chrome and Edge on Windows, via `e2e-app-compat.mjs`. The viewer uses only standard APIs (no Chromium-specific ones), but Firefox, Safari, and macOS hosts have **not** been run against this suite here, so they are not claimed as supported. Run `node e2e-app-compat.mjs` on those platforms to establish it.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full details.
 
