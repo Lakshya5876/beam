@@ -3,11 +3,10 @@
 Expose your localhost server to a remote browser peer over a direct WebRTC data channel — no cloud relay, no server costs, no account required.
 
 ```
-npm install -g @beamtunnel/cli
+npm install -g beam-tunnel
 
-bm 3000
-# or
-bm http://localhost:3000
+bm
+  Enter local URL (e.g. http://localhost:3000): 3000
 
   Viewer URL:   https://beam-viewer.pages.dev/?signaling=...
   Session code: 482 913
@@ -69,24 +68,37 @@ Firefox has not been tested in this release.
 ## Installation
 
 ```bash
-npm install -g @beamtunnel/cli     # requires Node >= 22
+npm install -g beam-tunnel     # requires Node >= 22
 
 # From source
 git clone https://github.com/Lakshya5876/beam
 cd beam && npm ci && npm run build
 ```
 
-> **Verify the npm package name** — confirm `@beamtunnel/cli` is unclaimed before publishing.
+> **Not yet published.** `beam-tunnel` is confirmed unclaimed on the npm registry as of the last check, but availability can change — re-verify (`npm view beam-tunnel`) immediately before running `npm publish`.
 
 ---
 
 ## Usage
 
+Run `bm` with no arguments and it asks for your local server address
+interactively — nothing to remember, nothing to look up:
+
+```
+bm
+  Enter local URL (e.g. http://localhost:3000): 3000
+```
+
+The prompt accepts any of `3000`, `localhost:3000`, or `http://localhost:3000`.
+For scripting or repeat use, the same value can be passed directly as an
+argument instead, skipping the prompt: `bm 3000`.
+
 ```
 bm [<local-url>] [options]
 
 Arguments:
-  <local-url>   Local server address. Accepts any of:
+  <local-url>   Local server address (optional — prompted for if omitted).
+                Accepts any of:
                   3000                    → http://localhost:3000
                   localhost:3000          → http://localhost:3000
                   http://localhost:3000   → as-is

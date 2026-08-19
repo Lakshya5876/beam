@@ -1,4 +1,4 @@
-# npm Publish Checklist — @beamtunnel/cli
+# npm Publish Checklist — beam-tunnel
 
 Publish is a human-only action on the deploy machine (LOCAL-ONLY, Architecture Guidelines
 §3). Prerequisite: RELEASE_CHECKLIST.md Phase 3 (live two-network test) has
@@ -7,9 +7,8 @@ passed.
 ## One-time setup
 
 - [ ] npm account with publish rights
-- [ ] The `@beamtunnel` scope exists and you are an owner
-      (`npm org` / `npm access ls-packages`), or create it at npmjs.com
 - [ ] `npm login` on the deploy machine
+      (`beam-tunnel` is unscoped — no npm organization to create or own first)
 
 ## Pre-publish verification
 
@@ -38,21 +37,21 @@ npx bm --help 2>&1 | head -3                # usage line prints, exit code 2 on 
 ```
 
 - [ ] `bm` resolves and prints usage
-- [ ] `node_modules/@beamtunnel/cli/dist/presentation/cli.js` is executable
+- [ ] `node_modules/beam-tunnel/dist/presentation/cli.js` is executable
 
 ## Publish
 
 ```bash
-npm publish --access public       # scoped packages default to restricted
+npm publish       # beam-tunnel is unscoped — public by default, no --access flag needed
 ```
 
 - [ ] Verify on npmjs.com: README renders, version correct
-- [ ] `npx @beamtunnel/cli@latest 3000` on a clean machine reaches the PIN
+- [ ] `npx beam-tunnel@latest 3000` on a clean machine reaches the PIN
       screen (this exercises the compiled DEFAULT_* URLs — the real deploy)
 
 ## Rollback
 
-`npm unpublish @beamtunnel/cli@<version>` works within 72h for a package with
+`npm unpublish beam-tunnel@<version>` works within 72h for a package with
 no dependents; otherwise `npm deprecate`. Never republish a changed tarball
 under the same version.
 

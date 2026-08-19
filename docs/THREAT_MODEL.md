@@ -209,10 +209,10 @@
 | **Category** | Tampering |
 | **Actor** | Attacker who publishes a malicious package named `beam` or similar on npm |
 | **Attack** | User runs `npm install -g beam` and gets attacker's binary instead of Beam |
-| **Mitigation 1** | Use scoped package name `@beamtunnel/cli` — impossible to squat a scoped package under a different org |
-| **Mitigation 2** | `"private": true` must be removed and replaced with `"publishConfig": { "access": "public" }` before first publish; two-factor authentication required on npm org |
+| **Mitigation 1** | Package name is `beam-tunnel` (unscoped, chosen for zero-friction `npm install`/`npx` — no org to create). Unscoped names CAN be squatted by anyone in principle; the mitigation here is picking a specific, distinctive, unambiguous name rather than a generic one, and verifying it resolves to the correct maintainer/repo before every release |
+| **Mitigation 2** | `"private": true` must be removed before first publish; unscoped packages publish public by default (no `--access public` needed, unlike a scoped package) |
 | **Mitigation 3** | Do not use the bare name `beam` (occupied by an unrelated package) |
-| **Implemented** | Partially — scoped name recommended but package not yet published |
+| **Implemented** | Partially — name chosen (`beam-tunnel`, confirmed unclaimed) but package not yet published |
 
 ---
 

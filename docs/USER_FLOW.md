@@ -22,13 +22,13 @@ The zero-trust model means **the viewer URL alone grants nothing**. A second sec
 ### Step 1: Install (first time only)
 
 ```bash
-npm install -g @beamtunnel/cli
+npm install -g beam-tunnel
 ```
 
 or for one-off use:
 
 ```bash
-npx @beamtunnel/cli 3000
+npx beam-tunnel 3000
 ```
 
 ### Step 2: Start a local dev server

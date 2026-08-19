@@ -162,18 +162,14 @@ Preference order based on: memorability, grep-ability, zero collision, scoped sa
 | `beamrelay` | Unscoped | Technically precise, maps to the architecture (`beam relay`), memorable. |
 | `locbeam` | Unscoped | "localhost + beam", short, clean. Less self-explanatory. |
 
-**Recommendation:** Use `@beamtunnel/cli` as the npm package name. This:
-1. Guarantees zero collision regardless of what exists unscoped
-2. Looks professional (`@org/pkg` signals intentional tooling)
-3. Lets you publish related packages later (`@beamtunnel/sdk`, `@beamtunnel/viewer`) under the same org
-4. Install is `npm install -g @beamtunnel/cli`; the installed binary command is still `beam`
+**Decision (superseding the original recommendation above):** Use `beam-tunnel` — unscoped, not `@beamtunnel/cli`. The scoped option was reconsidered and dropped in favor of removing all setup friction: an unscoped package needs no npm organization to create first, publishes public by default (no `--access public` flag), and installs/runs identically either way (`npm install -g beam-tunnel` or `npx beam-tunnel`). The tradeoff is real and worth stating plainly: an unscoped name does not have the scoped guarantee that no other org can ever publish something similar — the mitigation is the name's specificity (see THREAT_MODEL.md T11) and verifying it resolves correctly before each release, not namespace ownership.
 
-**Action required before publish:** Register the `beamtunnel` npm organization. It is free.
+**Action required before publish:** None — `beam-tunnel` requires no org registration, just an npm account to publish under.
 
 ### Verification checklist before `npm publish`
 
 - [ ] `npm search beam` — confirm no exact-match conflict for chosen name
-- [ ] `npx @beamtunnel/cli --version` returns your version, not an error
-- [ ] `npm info @beamtunnel/cli` returns 404 before publish, then your metadata after
-- [ ] GitHub org `beamtunnel` or `beamhole` registered for consistent brand identity
-- [ ] Domain `beamtunnel.dev` (or similar) checked for availability if planning a landing page
+- [ ] `npx beam-tunnel --version` returns your version, not an error
+- [ ] `npm info beam-tunnel` returns 404 before publish, then your metadata after
+- [ ] GitHub org/repo naming kept consistent with `beam-tunnel` for brand identity
+- [ ] Domain `beam-tunnel.dev` (or similar) checked for availability if planning a landing page

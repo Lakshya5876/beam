@@ -17,7 +17,7 @@ Beam has three physical packages and one shared protocol:
 │                                                                  │
 │  ┌─────────────────┐   WebSocket (signaling only)               │
 │  │  HOST (Node.js) │◄──────────────────────────►┌────────────┐  │
-│  │  @beamtunnel/cli│                             │  SIGNALING │  │
+│  │  beam-tunnel     │                             │  SIGNALING │  │
 │  │  node >= 22     │◄──────────────────────────►│  Cloudflare│  │
 │  └────────┬────────┘   WebSocket (signaling only)│  Worker +  │  │
 │           │                                      │  Durable   │  │
@@ -309,15 +309,15 @@ Layer violations are detected by ESLint rules enforced at commit time.
 
 ```json
 {
-  "name": "@beamtunnel/cli",
+  "name": "beam-tunnel",
   "bin": { "beam": "dist/cli.js" },
   "engines": { "node": ">=22.0.0" }
 }
 ```
 
 Build: `tsc --project tsconfig.build.json` → `dist/`  
-Install: `npm install -g @beamtunnel/cli`  
-Run: `beam 3000` or `npx @beamtunnel/cli 3000`
+Install: `npm install -g beam-tunnel`  
+Run: `beam 3000` or `npx beam-tunnel 3000`
 
 ### 8.2 Viewer (Cloudflare Pages)
 
