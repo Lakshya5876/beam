@@ -7,9 +7,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     rules: {
-      // COMPLEXITY GATE (CLAUDE.md / gate.sh): cyclomatic complexity ceiling.
-      // Threshold mirrors COMPLEXITY_THRESHOLD in .claude/gate_state.json;
-      // lowering/raising it is a human-PR change, never an agent edit.
+      // Cyclomatic complexity ceiling.
       complexity: ['error', 10],
     },
   },

@@ -90,8 +90,28 @@ Frame types:
 | 7 | ERROR | Either | UTF-8 reason string |
 | 8 | PING | Either | Empty |
 | 9 | PONG | Either | Empty |
+| 10 | WS_CONNECT | Viewer → Host | JSON: `{path, protocols}` |
+| 11 | WS_ACCEPT | Host → Viewer | JSON: `{protocol}` |
+| 12 | WS_REJECT | Host → Viewer | UTF-8 reason string |
+| 13 | WS_MESSAGE_HEAD | Either | 1 byte: isBinary flag |
+| 14 | WS_MESSAGE_CHUNK | Either | Raw bytes |
+| 15 | WS_MESSAGE_END | Either | Empty |
+| 16 | WS_CLOSE | Either | JSON: `{code, reason}` |
 
 Multiple request/response streams are multiplexed on a single DataChannel using `streamId`. The decoder validates the declared payload length against actual bytes before touching the payload — no allocation from peer-supplied values.
+
+A WS connection gets its own stream id from the same id space, framed with a
+HEAD/CHUNK*/END triad per message (mirroring REQUEST_*/RESPONSE_*) so message
+boundaries survive `MAX_PAYLOAD_SIZE` chunking. `WS_MESSAGE_END` completes one
+message but does not close the stream — only `WS_CLOSE` does (see "Multiplexer
+and backpressure" below for how per-message buffer accounting keeps a
+long-lived WS connection from tripping the buffer caps on cumulative traffic).
+
+The response side streams progressively: the host relays `RESPONSE_HEAD` and
+each `RESPONSE_BODY_CHUNK` to the viewer as bytes arrive from the local
+server, rather than buffering the full response first. This is required for
+SSE and other long-lived responses (which never truly "end" until the app
+closes them) and keeps host memory bounded for large downloads.
 
 ## Connection setup sequence
 
@@ -127,6 +147,13 @@ Host                    Signaling DO              Viewer
 - Max 1 MiB per-stream buffer
 - Max 16 MiB total buffer
 
+Per-stream buffer accounting is released when the stream's inbound half
+closes — for HTTP that's once, at `REQUEST_END`. A WS connection instead
+releases it after every `WS_MESSAGE_END`, so the 1 MiB cap bounds any ONE
+message rather than the connection's lifetime traffic; without this a
+healthy, long-lived WS connection would eventually trip the cap purely from
+cumulative small messages.
+
 When the total buffer crosses the high-water mark (1 MiB), the multiplexer pauses the DataChannel read loop. When it drains below the low-water mark (256 KiB), it resumes. This prevents unbounded memory growth under load.
 
 **A separate, lower cap applies on the viewer side first**: the service
@@ -154,7 +181,7 @@ If all strategies fail, the candidate is skipped. The SRFLX candidate (from STUN
 
 ## Service worker design
 
-The viewer's service worker (`viewer/src/sw.ts`) intercepts `fetch()` calls on its scope, EXCEPT the viewer's own shell/bundle (`shouldBypassRelay` in `sw-fetch-gate.ts`: `/`, `/assets/*`, `/__beam/*`) — those bypass to the network so the viewer app itself keeps working on reload. For every other intercepted request it:
+The viewer's service worker (`viewer/src/sw.ts`) intercepts `fetch()` calls on its scope, EXCEPT the OUTER shell's own shell/bundle on a genuine top-level document navigation (`shouldBypassRelay` in `sw-fetch-gate.ts`: `/`, `/assets/*`, `/__beam/*`) — those bypass to the network so the viewer app itself keeps working on reload. Critically, `shouldBypassRelay` never bypasses a request whose `destination === 'iframe'` — the tunneled-app iframe's OWN navigation to `/` is relayed, not treated as the viewer shell's root, even though the path is identical (see "iframe-shell architecture" below). For every other intercepted request it:
 
 1. Materialises the request body into a `Uint8Array` (v1 limitation: no streaming upload).
 2. Encodes REQUEST_HEAD + optional REQUEST_BODY_CHUNK(s) + REQUEST_END frames.
@@ -163,6 +190,42 @@ The viewer's service worker (`viewer/src/sw.ts`) intercepts `fetch()` calls on i
 5. Resolves the fetch with a synthetic `Response` from that stream.
 
 The SW lives at `/__beam/sw.js` and registers with scope `'/'`. It requires the `Service-Worker-Allowed: /` response header to be set by the server serving `sw.js`.
+
+## iframe-shell architecture
+
+The outer document (where the SW is registered and the RTCPeerConnection
+lives) never itself navigates to the tunneled app. Once the DataChannel opens,
+`bootstrap.ts` replaces its content with a single full-viewport `<iframe>` and
+sets its `src` to `/` — the SW relays that request (per the
+`destination === 'iframe'` exception above) to the tunneled app's real root
+page. Because the iframe is a separate browsing context, any further
+navigation inside it — client-side routed or a genuine server-rendered page
+load — unloads only the iframe's document, never the outer one holding the
+connection. This is what makes multi-page (not just SPA) tunneled apps work.
+
+## WebSocket relay
+
+A service worker can intercept `fetch()` but has no equivalent hook for
+`new WebSocket()`. Instead, every relayed `text/html` response gets a
+`<script type="module" src="/__beam/ws-shim.js">` tag injected right after
+its opening `<html>` (or `<head>` if there's no `<html>` tag) —
+`src/application/html-injection.ts` finds the insertion point byte-by-byte in
+a bounded lookahead as the response streams through, so it works without
+buffering the whole document, and never touches a compressed
+(`Content-Encoding`) response since injecting into compressed bytes would
+corrupt them.
+
+The shim (`viewer/src/ws-shim.ts`) replaces `window.WebSocket` inside the
+iframe with a lookalike implementing the standard event/property surface
+(`readyState`, `onopen`/`onmessage`/`onclose`/`onerror`, `addEventListener`,
+`send()`, `close()`). It reaches the outer document directly via
+`window.parent.__beamWsBridge` (same-origin, no postMessage needed) —
+`viewer/src/ws-bridge.ts` is the outer-side counterpart, opening a stream on
+the SAME `StreamMultiplexer` used for HTTP relay. The host side
+(`src/application/ws-relay-use-case.ts`, `src/infrastructure/ws-relay-client.ts`)
+dials a real WebSocket to `127.0.0.1:<port>` using Node's built-in WebSocket
+client (no new dependency) with the same loopback-confinement and path-
+validation guards as the HTTP relay path.
 
 ## Self-hosted deployment
 

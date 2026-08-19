@@ -49,9 +49,12 @@ harness cannot prove NAT traversal.
 - [ ] Version set (`0.1.0` for first publish), `CHANGELOG` entry if kept
 - [ ] `npm pack --dry-run` — files list is exactly `dist/`, `README.md`,
       `SECURITY.md`, `LIMITATIONS.md`, `LICENSE`, `package.json`
-- [ ] `npm publish --access public` (scoped package `@beamtunnel/cli`)
-- [ ] Post-publish smoke: `npx @beamtunnel/cli@latest 3000` on a machine that
-      has never seen this repo
+- [ ] `npm publish` (`beam-tunnel` is unscoped — public by default, no `--access` flag needed)
+- [ ] Post-publish smoke: `npm install -g beam-tunnel@latest` then `bm 3000`
+      on a machine that has never seen this repo. Do NOT substitute
+      `npx beam-tunnel` here — it fails on Windows for reasons unrelated to
+      the package (see LIMITATIONS.md), and would read as a false release
+      failure
 
 ## Phase 5 — after publish
 

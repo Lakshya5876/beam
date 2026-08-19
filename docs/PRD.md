@@ -44,7 +44,7 @@ Developers routinely need to share a locally running web application with a remo
 | **Shared signaling** | Shared Cloudflare Worker + Durable Object for SDP/ICE exchange and PIN validation |
 | **Honest failure** | ICE failures, expired sessions, wrong PIN, and host disconnect all surface as named errors with clear UI — no silent hangs |
 | **Request log** | Host terminal diagnostics: method, path, status, latency per relayed request |
-| **npm packaging** | `npm install -g @beamtunnel/cli` and `npx @beamtunnel/cli` |
+| **npm packaging** | `npm install -g beam-tunnel` (confirmed reliable). `npx beam-tunnel` currently fails on Windows — npx process-spawn bug, not a packaging defect, see LIMITATIONS.md |
 | **STUN** | Google STUN (`stun:stun.l.google.com:19302`) for direct ICE path discovery |
 
 ### Not in scope for v1 (explicitly)

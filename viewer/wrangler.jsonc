@@ -5,5 +5,35 @@
   // If the "beam-viewer" project name is taken, pick another and use that
   // name in every deploy doc/script that references it.
   "name": "beam-viewer",
-  "pages_build_output_dir": "dist"
+  "pages_build_output_dir": "dist",
+  // Advanced-mode merge: dist/_worker.js (bundled from _worker-src/entry.ts,
+  // see package.json's build:worker script) hosts signaling on the SAME
+  // origin as the static viewer bundle, instead of the separate
+  // beam-signaling.*.workers.dev origin — see docs/deploy/CLOUDFLARE_SETUP.md
+  // "single-origin merge" note for why. Pages cannot host a NEW Durable
+  // Object class itself — script_name binds to the class already defined
+  // and deployed in the beam-signaling Worker (cross-script binding). The
+  // client only ever talks to this pages.dev origin; which script actually
+  // hosts the DO instance is an internal Cloudflare-network detail.
+  "durable_objects": {
+    "bindings": [{ "name": "SESSIONS", "class_name": "SessionDurableObject", "script_name": "beam-signaling" }]
+  },
+  // Same dataset as signaling/wrangler.jsonc — see that file's comment and
+  // signaling/src/telemetry.ts for exactly what is (and is never) recorded.
+  // This is the origin real sessions actually hit, so most writes land here.
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "beam_connection_outcomes" }
+  ],
+  // This origin serves GET /ice-config to BOTH peers (the viewer page and the
+  // host CLI), so TURN must be configured HERE too — configuring it only on
+  // the standalone signaling Worker leaves this origin STUN-only. Same keys
+  // as signaling/wrangler.jsonc: METERED_APP_NAME as a var below,
+  // METERED_SECRET_KEY as a Pages secret (never in this file):
+  //   npx wrangler pages secret put METERED_SECRET_KEY
+  "vars": {
+    "ICE_SERVERS": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
+    "METERED_APP_NAME": "beam-lex",
+    "MINT_MAX_PER_MINUTE": "30",
+    "PIN_MAX_ATTEMPTS": "3"
+  }
 }

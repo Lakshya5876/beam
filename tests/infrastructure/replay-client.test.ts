@@ -2,7 +2,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LoopbackReplayClient } from '../../src/infrastructure/replay-client.js';
-import type { ReplayRequest } from '../../src/domain/interfaces.js';
+import type { ReplayFailedError, ReplayRequest } from '../../src/domain/interfaces.js';
 
 interface Captured {
   method: string | undefined;
@@ -60,22 +60,62 @@ function request(overrides: Partial<ReplayRequest>): ReplayRequest {
   };
 }
 
+/**
+ * Drive LoopbackReplayClient's streaming ReplaySink and buffer the result back
+ * into a single value — the fixture assertions below care about the complete
+ * response, not per-chunk delivery (that's covered by the dedicated streaming
+ * describe block further down).
+ */
+interface Buffered {
+  readonly ok: boolean;
+  readonly error: ReplayFailedError | undefined;
+  readonly status: number | undefined;
+  readonly headers: Record<string, string> | undefined;
+  readonly body: Uint8Array;
+}
+
+async function bufferedReplay(client: LoopbackReplayClient, req: ReplayRequest): Promise<Buffered> {
+  let status: number | undefined;
+  let headers: Record<string, string> | undefined;
+  const chunks: Uint8Array[] = [];
+  const result = await client.replay(req, {
+    onHead: (h) => {
+      status = h.status;
+      headers = h.headers as Record<string, string>;
+    },
+    onChunk: (c) => {
+      chunks.push(c);
+    },
+    onEnd: () => undefined,
+  });
+  const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    body.set(c, offset);
+    offset += c.byteLength;
+  }
+  if (!result.ok) {
+    return { ok: false, error: result.error, status, headers, body };
+  }
+  return { ok: true, error: undefined, status, headers, body };
+}
+
 describe('LoopbackReplayClient — faithful relay (real loopback server)', () => {
   it('relays method, path, and body and returns the server status/headers/body', async () => {
     const captured: Captured[] = [];
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(
+    const result = await bufferedReplay(
+      client,
       request({ method: 'POST', path: '/api/items?p=2', headers: { 'x-demo': 'yes' }, body: new TextEncoder().encode('hello') }),
     );
 
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.status).toBe(201);
-      expect(result.value.headers['x-server']).toBe('beam-test');
-      expect(new TextDecoder().decode(result.value.body)).toBe('ok');
-    }
+    expect(result.status).toBe(201);
+    expect(result.headers?.['x-server']).toBe('beam-test');
+    expect(new TextDecoder().decode(result.body)).toBe('ok');
     expect(captured).toHaveLength(1);
     expect(captured[0]?.method).toBe('POST');
     expect(captured[0]?.url).toBe('/api/items?p=2');
@@ -88,12 +128,75 @@ describe('LoopbackReplayClient — faithful relay (real loopback server)', () =>
     const client = new LoopbackReplayClient(port);
     const bytes = new Uint8Array(256).map((_, i) => i);
 
-    const result = await client.replay(request({ method: 'PUT', path: '/blob', body: bytes }));
+    const result = await bufferedReplay(client, request({ method: 'PUT', path: '/blob', body: bytes }));
 
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(Array.from(result.value.body)).toEqual(Array.from(bytes));
-    }
+    expect(Array.from(result.body)).toEqual(Array.from(bytes));
+  });
+});
+
+describe('LoopbackReplayClient — streaming', () => {
+  it('delivers body bytes to onChunk before onEnd, without waiting for the full response', async () => {
+    const port = await startServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('first');
+      // Flush "first" to the wire before the request handler returns, so the
+      // client observes onChunk for it ahead of onEnd — proves streaming, not
+      // buffer-then-deliver.
+      setTimeout(() => {
+        res.end('second');
+      }, 20);
+    });
+    const client = new LoopbackReplayClient(port);
+
+    const events: string[] = [];
+    const chunks: string[] = [];
+    const result = await client.replay(request({}), {
+      onHead: (h) => {
+        events.push(`head:${String(h.status)}`);
+      },
+      onChunk: (c) => {
+        chunks.push(new TextDecoder().decode(c));
+        events.push('chunk');
+      },
+      onEnd: () => {
+        events.push('end');
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(events[0]).toBe('head:200');
+    expect(events[events.length - 1]).toBe('end');
+    expect(chunks.join('')).toBe('firstsecond');
+    // At least one chunk arrived before end — the defining streaming property.
+    expect(events.filter((e) => e === 'chunk').length).toBeGreaterThan(0);
+  });
+
+  it('reports a mid-stream failure via err() after onHead has already fired', async () => {
+    const port = await startServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.write('partial');
+      // Destroy the socket mid-response instead of a clean end — simulates the
+      // upstream dying after headers were already sent to the viewer.
+      setTimeout(() => {
+        res.destroy();
+      }, 20);
+    });
+    const client = new LoopbackReplayClient(port);
+
+    let headSeen = false;
+    const result = await client.replay(request({}), {
+      onHead: () => {
+        headSeen = true;
+      },
+      onChunk: () => undefined,
+      onEnd: () => undefined,
+    });
+
+    expect(headSeen).toBe(true);
+    expect(result.ok).toBe(false);
   });
 });
 
@@ -103,7 +206,8 @@ describe('LoopbackReplayClient — header hygiene', () => {
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    await client.replay(
+    await bufferedReplay(
+      client,
       request({
         headers: {
           'transfer-encoding': 'chunked',
@@ -124,7 +228,7 @@ describe('LoopbackReplayClient — header hygiene', () => {
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    await client.replay(request({ headers: { host: 'evil.example.com' } }));
+    await bufferedReplay(client, request({ headers: { host: 'evil.example.com' } }));
 
     expect(captured[0]?.headers.host).toBe(`${LOOPBACK}:${String(port)}`);
   });
@@ -136,12 +240,10 @@ describe('LoopbackReplayClient — injection-safe (rejects before sending)', () 
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ headers: { 'x-bad\r\nInjected: evil': 'v' } }));
+    const result = await bufferedReplay(client, request({ headers: { 'x-bad\r\nInjected: evil': 'v' } }));
 
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.error).toBe('ReplayFailed');
-    }
+    expect(result.error?.error).toBe('ReplayFailed');
     expect(captured).toHaveLength(0);
   });
 
@@ -150,7 +252,7 @@ describe('LoopbackReplayClient — injection-safe (rejects before sending)', () 
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ headers: { 'x-bad': 'v\r\nGET /evil HTTP/1.1' } }));
+    const result = await bufferedReplay(client, request({ headers: { 'x-bad': 'v\r\nGET /evil HTTP/1.1' } }));
 
     expect(result.ok).toBe(false);
     expect(captured).toHaveLength(0);
@@ -161,7 +263,7 @@ describe('LoopbackReplayClient — injection-safe (rejects before sending)', () 
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/x\r\nGET /evil HTTP/1.1' }));
+    const result = await bufferedReplay(client, request({ path: '/x\r\nGET /evil HTTP/1.1' }));
 
     expect(result.ok).toBe(false);
     expect(captured).toHaveLength(0);
@@ -172,7 +274,7 @@ describe('LoopbackReplayClient — injection-safe (rejects before sending)', () 
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/api\x00/secret' }));
+    const result = await bufferedReplay(client, request({ path: '/api\x00/secret' }));
 
     expect(result.ok).toBe(false);
     expect(captured).toHaveLength(0);
@@ -184,20 +286,18 @@ describe('LoopbackReplayClient — path traversal rejection', () => {
     const port = await startServer(capturing([]));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/../etc/passwd' }));
+    const result = await bufferedReplay(client, request({ path: '/../etc/passwd' }));
 
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.error).toBe('ReplayFailed');
-      expect(result.error.reason).toContain('traversal');
-    }
+    expect(result.error?.error).toBe('ReplayFailed');
+    expect(result.error?.reason).toContain('traversal');
   });
 
   it('rejects a path with a mid-path .. segment', async () => {
     const port = await startServer(capturing([]));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/api/../../../etc/shadow' }));
+    const result = await bufferedReplay(client, request({ path: '/api/../../../etc/shadow' }));
 
     expect(result.ok).toBe(false);
   });
@@ -206,7 +306,7 @@ describe('LoopbackReplayClient — path traversal rejection', () => {
     const port = await startServer(capturing([]));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/%2e%2e/etc/passwd' }));
+    const result = await bufferedReplay(client, request({ path: '/%2e%2e/etc/passwd' }));
 
     expect(result.ok).toBe(false);
   });
@@ -215,7 +315,7 @@ describe('LoopbackReplayClient — path traversal rejection', () => {
     const port = await startServer(capturing([]));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/.%2e/secret' }));
+    const result = await bufferedReplay(client, request({ path: '/.%2e/secret' }));
 
     expect(result.ok).toBe(false);
   });
@@ -224,7 +324,7 @@ describe('LoopbackReplayClient — path traversal rejection', () => {
     const port = await startServer(capturing([]));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/api%2f..%2fsecret' }));
+    const result = await bufferedReplay(client, request({ path: '/api%2f..%2fsecret' }));
 
     expect(result.ok).toBe(false);
   });
@@ -234,7 +334,7 @@ describe('LoopbackReplayClient — path traversal rejection', () => {
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/api/v1/data.csv' }));
+    const result = await bufferedReplay(client, request({ path: '/api/v1/data.csv' }));
 
     expect(result.ok).toBe(true);
     expect(captured).toHaveLength(1);
@@ -245,7 +345,7 @@ describe('LoopbackReplayClient — path traversal rejection', () => {
     const port = await startServer(capturing(captured));
     const client = new LoopbackReplayClient(port);
 
-    const result = await client.replay(request({ path: '/api/./resource' }));
+    const result = await bufferedReplay(client, request({ path: '/api/./resource' }));
 
     expect(result.ok).toBe(true);
     expect(captured).toHaveLength(1);
@@ -261,12 +361,10 @@ describe('LoopbackReplayClient — totality and port confinement', () => {
     await new Promise<void>((resolve) => tmp.close(() => resolve()));
 
     const client = new LoopbackReplayClient(deadPort);
-    const result = await client.replay(request({}));
+    const result = await bufferedReplay(client, request({}));
 
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.error).toBe('ReplayFailed');
-    }
+    expect(result.error?.error).toBe('ReplayFailed');
   });
 
   it('is confined to the construction port — a URL-shaped path still lands on that server', async () => {
@@ -276,7 +374,7 @@ describe('LoopbackReplayClient — totality and port confinement', () => {
 
     // A hostile path that looks like an absolute URL to another host:port is
     // sent only as a request path; host/port remain the constructed loopback.
-    await client.replay(request({ path: '/proxy?target=http://other.example:9999/x' }));
+    await bufferedReplay(client, request({ path: '/proxy?target=http://other.example:9999/x' }));
 
     expect(captured).toHaveLength(1);
     expect(captured[0]?.headers.host).toBe(`${LOOPBACK}:${String(port)}`);

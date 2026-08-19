@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy the Beam viewer to Cloudflare Pages. HUMAN-ONLY, DEPLOY MACHINE ONLY.
-# Refuses to run without explicit confirmation (Architecture Guidelines §3 LOCAL-ONLY).
+# Refuses to run without explicit confirmation (LOCAL-ONLY).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="${BEAM_PAGES_PROJECT:-beam-viewer}"
@@ -28,6 +28,12 @@ npm run build
 
 # Load-bearing artifact checks BEFORE pushing anything
 test -f dist/__beam/sw.js || { echo "FATAL: dist/__beam/sw.js missing" >&2; exit 1; }
+# Without this, Pages deploys as a plain static site with no merged
+# signaling origin — the WS-upgrade path that motivated the merge in the
+# first place silently breaks again, on some networks only, with no error
+# at deploy time. `npm run build` produces this automatically; a check
+# here catches the case where dist/ was built some other way.
+test -f dist/_worker.js || { echo "FATAL: dist/_worker.js missing (merged signaling worker not built)" >&2; exit 1; }
 grep -q 'Service-Worker-Allowed' dist/_headers || { echo "FATAL: dist/_headers missing Service-Worker-Allowed" >&2; exit 1; }
 
 npx wrangler pages deploy dist --project-name "$PROJECT" --branch main

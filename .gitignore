@@ -7,20 +7,22 @@ dist/
 # Test artifacts
 coverage/
 
-# Secrets — NEVER committed (CLAUDE.md §3)
+# Secrets — NEVER committed
 .env
 .env.*
 !.env.example
 .env.worktree
 *.pem
 
-# Agent stateful layer (per-clone, written by gate.sh / checkpoint writes)
-.claude/gate_state.json
-.claude/gate_state.json.tmp.*
-.claude/last_gate_report.txt
-.claude/.pending_bypass
-.claude/checkpoints/
-
 # OS / editor noise
 .DS_Store
 npm-debug.log*
+.claude/session_state.json
+.claude/session_spend.tmp
+.claude/git_cache.json
+.claude/checkpoints/
+.claude/covenant_state.json
+
+# Local governance-bootstrap reference material — not project documentation
+v1_claude_code_development_guide_existing.md
+v1_implementation_package_existing.md

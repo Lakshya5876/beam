@@ -1,6 +1,6 @@
 /**
  * Path authorization (design doc §A.3 --allowed-paths). Application layer
- * owns authorization rules (CLAUDE.md §1). Pure: no I/O, domain types only.
+ * owns authorization rules. Pure: no I/O, domain types only.
  *
  * Matching is PATH-SEGMENT prefix, not raw string prefix: an allow-list entry
  * "/api" permits "/api" and "/api/..." but NOT "/apifoo". An empty allow-list

@@ -21,6 +21,7 @@ import {
   frameError,
   frameResponse,
   isRelayDecodeError,
+  rewriteSelfReferentialLocation,
 } from '../../src/application/relay-use-case.js';
 
 const SID = 5;
@@ -51,18 +52,129 @@ const decode = new TextDecoder();
 // Reuses the S3 fake pattern (tests/domain/interfaces.test.ts): a plain object
 // literal implementing ReplayClient via ok/err — here parameterized to record
 // the request and return a configurable Result. No parallel reimplementation.
+// impl still returns a single buffered ReplayResponse (most tests don't care
+// about streaming granularity); this adapter drives it through the real
+// streaming ReplaySink contract (one onHead, one onChunk if non-empty, onEnd).
 function makeReplayClient(
   impl: (request: ReplayRequest) => Result<ReplayResponse, ReplayFailedError>,
 ): { client: ReplayClient; calls: ReplayRequest[] } {
   const calls: ReplayRequest[] = [];
   const client: ReplayClient = {
-    replay(request) {
+    async replay(request, sink) {
       calls.push(request);
-      return Promise.resolve(impl(request));
+      const result = impl(request);
+      if (!result.ok) {
+        return result;
+      }
+      await sink.onHead({ status: result.value.status, headers: result.value.headers });
+      if (result.value.body.byteLength > 0) {
+        await sink.onChunk(result.value.body);
+      }
+      await sink.onEnd();
+      return ok(undefined);
     },
   };
   return { client, calls };
 }
+
+async function collectFrames(useCase: ExecuteRelayUseCase, frames: Frame[]): Promise<Frame[]> {
+  const out: Frame[] = [];
+  await useCase.execute(frames, (frame) => {
+    out.push(frame);
+  });
+  return out;
+}
+
+describe('rewriteSelfReferentialLocation', () => {
+  it('rewrites an absolute localhost Location to a path-relative one', () => {
+    expect(rewriteSelfReferentialLocation('http://localhost:3000/dashboard?x=1#y')).toBe('/dashboard?x=1#y');
+  });
+
+  it('rewrites an absolute 127.0.0.1 Location regardless of port', () => {
+    expect(rewriteSelfReferentialLocation('http://127.0.0.1:9999/login')).toBe('/login');
+  });
+
+  it('leaves a genuinely different absolute host untouched', () => {
+    expect(rewriteSelfReferentialLocation('https://example.com/callback')).toBe('https://example.com/callback');
+  });
+
+  it('leaves an already-relative Location untouched', () => {
+    expect(rewriteSelfReferentialLocation('/already/relative')).toBe('/already/relative');
+  });
+});
+
+describe('ExecuteRelayUseCase — Location rewrite on the streamed head', () => {
+  function requestFramesFor(path: string): Frame[] {
+    return [
+      frame(FrameType.REQUEST_HEAD, encodeRequestHead({ method: 'GET', path, headers: {} })),
+      frame(FrameType.REQUEST_END, new Uint8Array(0)),
+    ];
+  }
+
+  it('rewrites a self-referential Location header before framing RESPONSE_HEAD', async () => {
+    const { client } = makeReplayClient(() =>
+      ok({ status: 302, headers: { location: 'http://localhost:4000/next' }, body: new Uint8Array(0) }),
+    );
+    const useCase = new ExecuteRelayUseCase(client);
+    const frames = await collectFrames(useCase, requestFramesFor('/start'));
+    const head = decodeResponseHead(frames[0]!.payload);
+    expect(head.ok).toBe(true);
+    if (head.ok) {
+      expect(head.value.headers['location']).toBe('/next');
+    }
+  });
+});
+
+describe('ExecuteRelayUseCase — WS shim injection into HTML responses', () => {
+  function requestFramesFor(path: string): Frame[] {
+    return [
+      frame(FrameType.REQUEST_HEAD, encodeRequestHead({ method: 'GET', path, headers: {} })),
+      frame(FrameType.REQUEST_END, new Uint8Array(0)),
+    ];
+  }
+
+  it('injects the shim script tag into a text/html response and strips content-length', async () => {
+    const { client } = makeReplayClient(() =>
+      ok({
+        status: 200,
+        headers: { 'content-type': 'text/html', 'content-length': '9999' },
+        body: utf8.encode('<html><body>hi</body></html>'),
+      }),
+    );
+    const useCase = new ExecuteRelayUseCase(client);
+    const frames = await collectFrames(useCase, requestFramesFor('/'));
+
+    const head = decodeResponseHead(frames[0]!.payload);
+    expect(head.ok).toBe(true);
+    if (head.ok) {
+      expect(head.value.headers['content-length']).toBeUndefined();
+      expect(head.value.headers['content-type']).toBe('text/html');
+    }
+    const body = frames.filter((f) => f.type === FrameType.RESPONSE_BODY_CHUNK).map((f) => decode.decode(f.payload)).join('');
+    expect(body).toBe('<html><script type="module" src="/__beam/ws-shim.js"></script><body>hi</body></html>');
+  });
+
+  it('does not touch a non-HTML response', async () => {
+    const { client } = makeReplayClient(() =>
+      ok({ status: 200, headers: { 'content-type': 'application/json' }, body: utf8.encode('{"a":1}') }),
+    );
+    const useCase = new ExecuteRelayUseCase(client);
+    const frames = await collectFrames(useCase, requestFramesFor('/api'));
+    const body = frames.filter((f) => f.type === FrameType.RESPONSE_BODY_CHUNK).map((f) => decode.decode(f.payload)).join('');
+    expect(body).toBe('{"a":1}');
+  });
+
+  it('does not inject into a compressed HTML response (would corrupt the stream) — relayed byte-for-byte instead', async () => {
+    const compressedLooking = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03]); // gzip magic + junk
+    const { client } = makeReplayClient(() =>
+      ok({ status: 200, headers: { 'content-type': 'text/html', 'content-encoding': 'gzip' }, body: compressedLooking }),
+    );
+    const useCase = new ExecuteRelayUseCase(client);
+    const frames = await collectFrames(useCase, requestFramesFor('/'));
+    const bodyBytes = frames.find((f) => f.type === FrameType.RESPONSE_BODY_CHUNK)!.payload;
+    expect(Array.from(bodyBytes)).toEqual(Array.from(compressedLooking));
+  });
+});
 
 describe('relay head codecs', () => {
   it('request head round-trips', () => {
@@ -220,7 +332,7 @@ describe('ExecuteRelayUseCase', () => {
       ok({ status: 200, headers: { 'content-type': 'text/plain' }, body: utf8.encode(`echo:${request.path}`) }),
     );
     const useCase = new ExecuteRelayUseCase(client);
-    const frames = await useCase.execute(requestFrames('/hi', 'payload'));
+    const frames = await collectFrames(useCase, requestFrames('/hi', 'payload'));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toBe('/hi');
     expect(decode.decode(calls[0]!.body)).toBe('payload');
@@ -231,7 +343,7 @@ describe('ExecuteRelayUseCase', () => {
   it('returns a single ERROR frame when replay fails', async () => {
     const { client } = makeReplayClient(() => err({ error: 'ReplayFailed', reason: 'ECONNREFUSED' }));
     const useCase = new ExecuteRelayUseCase(client);
-    const frames = await useCase.execute(requestFrames('/down', ''));
+    const frames = await collectFrames(useCase, requestFrames('/down', ''));
     expect(frames.map((f) => f.type)).toEqual([FrameType.ERROR]);
     expect(decode.decode(frames[0]!.payload)).toBe('ECONNREFUSED');
   });
@@ -240,7 +352,7 @@ describe('ExecuteRelayUseCase', () => {
     const { client, calls } = makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) }));
     const useCase = new ExecuteRelayUseCase(client);
     // Body chunk before head -> assembly fails.
-    const frames = await useCase.execute([frame(FrameType.REQUEST_BODY_CHUNK, utf8.encode('x'))]);
+    const frames = await collectFrames(useCase, [frame(FrameType.REQUEST_BODY_CHUNK, utf8.encode('x'))]);
     expect(frames.map((f) => f.type)).toEqual([FrameType.ERROR]);
     expect(calls).toHaveLength(0);
   });
@@ -248,6 +360,6 @@ describe('ExecuteRelayUseCase', () => {
   it('returns no frames for an empty input', async () => {
     const { client } = makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) }));
     const useCase = new ExecuteRelayUseCase(client);
-    expect(await useCase.execute([])).toEqual([]);
+    expect(await collectFrames(useCase, [])).toEqual([]);
   });
 });

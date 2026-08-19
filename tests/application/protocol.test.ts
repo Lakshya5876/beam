@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   FrameType,
+  MAX_PAYLOAD_SIZE,
   createFramePayload,
   createStreamId,
   isInvalidStreamIdError,
@@ -301,6 +302,52 @@ describe('buffer caps', () => {
   });
 });
 
+describe('WS_MESSAGE_END releases buffer without closing the stream (a long-lived WS connection)', () => {
+  it('many small messages over time never trip the per-stream buffer cap, unlike one big HTTP body would', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport, tinyLimits({ maxStreamBufferBytes: 10, maxTotalBufferBytes: 10 }));
+    // Each message is under the cap; WS_MESSAGE_END must release its bytes so
+    // the NEXT message starts from zero — otherwise a healthy, long-lived WS
+    // connection would eventually trip the cap on cumulative traffic alone.
+    for (let i = 0; i < 50; i += 1) {
+      const head = mux.acceptInbound(frame(FrameType.WS_MESSAGE_HEAD, 9, 1));
+      expect(head.ok).toBe(true);
+      const chunk = mux.acceptInbound(frame(FrameType.WS_MESSAGE_CHUNK, 9, 6));
+      expect(chunk.ok).toBe(true);
+      const end = mux.acceptInbound(frame(FrameType.WS_MESSAGE_END, 9, 0));
+      expect(end.ok).toBe(true);
+    }
+    expect(mux.openCount()).toBe(1); // still open — WS_MESSAGE_END is not a half-close
+    expect(transport.errorFrames()).toHaveLength(0);
+  });
+
+  it('a SINGLE message exceeding the per-stream cap is still rejected (the cap bounds one message, not the connection)', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport, tinyLimits({ maxStreamBufferBytes: 10 }));
+    expect(mux.acceptInbound(frame(FrameType.WS_MESSAGE_HEAD, 9, 1)).ok).toBe(true);
+    expect(mux.acceptInbound(frame(FrameType.WS_MESSAGE_CHUNK, 9, 6)).ok).toBe(true);
+    const overflow = mux.acceptInbound(frame(FrameType.WS_MESSAGE_CHUNK, 9, 6));
+    expect(overflow.ok).toBe(false);
+    if (!overflow.ok) {
+      expect(overflow.error.reason).toBe('stream-buffer-cap');
+    }
+  });
+
+  it('WS_CLOSE closes its half like REQUEST_END/RESPONSE_END — both directions closing fully retires the stream', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    expect(mux.acceptInbound(frame(FrameType.WS_CONNECT, 9, 4)).ok).toBe(true);
+    expect(mux.openCount()).toBe(1);
+    // Inbound WS_CLOSE alone only closes the INBOUND half — same half-close
+    // model as REQUEST_END/RESPONSE_END: the stream stays "open" until the
+    // OTHER half closes too (here, this side sending its own WS_CLOSE).
+    expect(mux.acceptInbound(frame(FrameType.WS_CLOSE, 9, 4)).ok).toBe(true);
+    expect(mux.openCount()).toBe(1);
+    expect(mux.writeFrame(frame(FrameType.WS_CLOSE, 9, 4)).ok).toBe(true);
+    expect(mux.openCount()).toBe(0);
+  });
+});
+
 describe('backpressure hysteresis (high/low-water gap)', () => {
   it('over-high pauses, drained-to-between STAYS paused, below-low resumes', () => {
     const transport = new FakeTransport();
@@ -439,5 +486,87 @@ describe('adoptStream — externally-assigned ids (SW-allocated on the viewer)',
     mux.onInbound((f) => seen.push(f.streamId));
     transport.emit(frame(FrameType.RESPONSE_HEAD, 9));
     expect(seen).toEqual([9]);
+  });
+});
+
+describe('releaseInbound — consumer-owned buffer accounting', () => {
+  const CHUNK = MAX_PAYLOAD_SIZE;
+  const PER_STREAM_CAP = 1024 * 1024;
+
+  it('lets a stream carry far more than the per-stream cap when the consumer releases', () => {
+    // The viewer forwards each response frame to the service worker and keeps
+    // nothing. Before releaseInbound existed the cap counted a response's
+    // cumulative size, so anything over 1 MiB was killed mid-body.
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    const forwarded: Frame[] = [];
+    mux.onInbound((f) => {
+      forwarded.push(f);
+      mux.releaseInbound(f);
+    });
+
+    let accepted = 0;
+    for (let sent = 0; sent < 3 * PER_STREAM_CAP; sent += CHUNK) {
+      if (mux.acceptInbound(frame(FrameType.RESPONSE_BODY_CHUNK, 1, CHUNK)).ok) accepted += 1;
+    }
+
+    expect(forwarded).toHaveLength(accepted);
+    expect(accepted).toBeGreaterThan(Math.ceil(PER_STREAM_CAP / CHUNK));
+    expect(transport.sent.filter((f) => f.type === FrameType.ERROR)).toHaveLength(0);
+  });
+
+  it('still enforces the cap for a consumer that does NOT release (the host)', () => {
+    // The host accumulates REQUEST_* frames until REQUEST_END, so it really
+    // does hold every byte — that protection must be untouched.
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    mux.onInbound(() => { /* holds the frame, releases nothing */ });
+
+    let rejected = 0;
+    for (let sent = 0; sent < 2 * PER_STREAM_CAP; sent += CHUNK) {
+      if (!mux.acceptInbound(frame(FrameType.REQUEST_BODY_CHUNK, 1, CHUNK)).ok) rejected += 1;
+    }
+
+    expect(rejected).toBeGreaterThan(0);
+  });
+
+  it('is clamped: over-releasing never drives accounting negative', () => {
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    const f = frame(FrameType.RESPONSE_BODY_CHUNK, 1, 1000);
+    mux.acceptInbound(f);
+
+    mux.releaseInbound(f);
+    mux.releaseInbound(f);
+    mux.releaseInbound(f);
+
+    // Accounting intact: a fresh full-size stream is still accepted.
+    expect(mux.acceptInbound(frame(FrameType.RESPONSE_BODY_CHUNK, 2, CHUNK)).ok).toBe(true);
+  });
+
+  it('releasing an unknown stream is a no-op', () => {
+    const mux = new StreamMultiplexer(new FakeTransport());
+    expect(() => { mux.releaseInbound(frame(FrameType.RESPONSE_BODY_CHUNK, 99, 10)); }).not.toThrow();
+  });
+});
+
+describe('a tripped cap fails the local request instead of hanging it', () => {
+  it('delivers an ERROR frame to LOCAL handlers, not only to the peer', () => {
+    // Only the peer used to be told, so the pending fetch on this side waited
+    // for a response that could never arrive until its own 30s timeout.
+    const transport = new FakeTransport();
+    const mux = new StreamMultiplexer(transport);
+    const local: Frame[] = [];
+    mux.onInbound((f) => local.push(f));
+
+    for (let sent = 0; sent <= 1024 * 1024; sent += MAX_PAYLOAD_SIZE) {
+      mux.acceptInbound(frame(FrameType.REQUEST_BODY_CHUNK, 1, MAX_PAYLOAD_SIZE));
+    }
+
+    const localErrors = local.filter((f) => f.type === FrameType.ERROR);
+    expect(localErrors).toHaveLength(1);
+    expect(new TextDecoder().decode(localErrors[0]!.payload)).toBe('stream-buffer-cap');
+    // The peer is still told too, as before.
+    expect(transport.sent.filter((f) => f.type === FrameType.ERROR)).toHaveLength(1);
   });
 });

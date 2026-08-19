@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# pre-commit — delegates to covenant.sh
+# SKIP_COVENANT=1 is a TTY-guarded bypass with git-note audit trail.
+set -euo pipefail
+
+# Detect an IDE-extension / non-interactive wrapper. In these environments an
+# interactive `read </dev/tty` either hangs the editor or fails on a missing
+# controlling terminal — so we must fall through gracefully, never block.
+_is_extension_or_non_tty() {
+    # Hardware-level TTY test takes absolute precedence over all passive env-var
+    # checks. Inherited vars like VSCODE_PID or CURSOR_TRACE_ID can be present
+    # in a genuine interactive terminal (e.g. opened from VS Code's file manager
+    # or launched via an alias in a sourced shell profile). Two real file
+    # descriptors attached to a terminal is conclusive — no passive check overrides it.
+    [ -t 0 ] && [ -t 1 ] && return 1
+
+    # Passive checks only reached when at least one FD is not a real terminal.
+    # Each condition is independent — explicit returns avoid &&/|| precedence traps.
+    [ ! -t 0 ]                              && return 0   # stdin not a terminal
+    [ ! -r /dev/tty ]                       && return 0   # no controlling terminal
+    [ "${TERM_PROGRAM:-}" = "vscode" ]      && return 0   # VS Code integrated terminal
+    [ -n "${VSCODE_PID:-}" ]                && return 0
+    [ -n "${VSCODE_GIT_IPC_HANDLE:-}" ]     && return 0
+    [ -n "${CURSOR_TRACE_ID:-}" ]           && return 0   # Cursor
+    case "${__CFBundleIdentifier:-}" in *vscode*|*cursor*) return 0 ;; esac
+    return 1
+}
+
+if [ "${SKIP_COVENANT:-0}" = "1" ]; then
+    # The bypass requires a typed reason at an interactive terminal. If we cannot
+    # safely prompt (extension/non-TTY), refuse with explicit instructions rather
+    # than hang the editor or emit control codes into the output pane.
+    if _is_extension_or_non_tty; then
+        echo "==============================================================" >&2
+        echo "[CRASH GUARD] SKIP_COVENANT bypass needs an interactive terminal." >&2
+        echo "An IDE-extension / non-TTY environment was detected, so the" >&2
+        echo "audited bypass prompt cannot run here (it would freeze the UI)." >&2
+        echo "" >&2
+        echo "To bypass the covenant, run the commit from a real terminal:" >&2
+        echo "    SKIP_COVENANT=1 git commit -m \"your message\"" >&2
+        echo "and type the required bypass reason when prompted." >&2
+        echo "Otherwise, fix the covenant findings and commit normally." >&2
+        echo "==============================================================" >&2
+        exit 1
+    fi
+    read -r -p "Bypass reason (required): " BYPASS_REASON </dev/tty
+    if [ -z "$BYPASS_REASON" ]; then
+        echo "Bypass reason is required. Aborting." >&2
+        exit 1
+    fi
+    COMMITTER_DATE=$(date +%s)
+    git notes --ref=refs/notes/bypasses append HEAD -m "BYPASS | date=${COMMITTER_DATE} | reason=${BYPASS_REASON}" 2>/dev/null || true
+    echo "Covenant bypassed. Reason logged to refs/notes/bypasses." >&2
+    exit 0
+fi
+
+COVENANT_TRIGGER=pre-commit exec python "$(git rev-parse --git-dir)"/../.githooks/covenantwin.py covenant --trigger pre-commit

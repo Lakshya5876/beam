@@ -14,6 +14,19 @@
  * DO verifies SHA-256(value + ":" + sessionCode) against stored hash. On match,
  * pendingForViewer is flushed and WebRTC signaling begins. Three-strike lockout.
  *
+ * Security invariant: relayMessage forwards NEITHER direction until pinVerified
+ * — not just host->viewer. Before this fix, a viewer socket that never submitted
+ * a PIN (or the wrong one) could still have its SDP-answer/ICE-candidate frames
+ * relayed straight to the host, and — because assignRole grants the 'viewer' tag
+ * on connect, before any PIN check — an attacker holding only the shareable link
+ * (no PIN) could occupy the sole viewer slot indefinitely, permanently locking
+ * out the real viewer (assignRole rejects a third connection as session-full).
+ * Two mitigations: (1) relayMessage below drops viewer-origin messages outright
+ * pre-verification instead of forwarding them; (2) an unverified viewer socket
+ * is evicted by a DO alarm after VIEWER_VERIFY_TIMEOUT_MS so a squatter cannot
+ * hold the slot forever — the wrong-PIN lockout already frees it after 3
+ * attempts, this covers the "never attempts" case.
+ *
  * Runtime-bound; the live pairing/relay/hibernation path is verified at S18.
  */
 
@@ -30,6 +43,14 @@ const USED_PREFIX = 'used:';
 const PIN_VERIFIED_KEY = 'pin-verified';
 const PENDING_COUNT_KEY = 'pending-count';
 const PENDING_PREFIX = 'pending:';
+
+/**
+ * How long an unverified viewer may occupy the sole viewer slot before the DO
+ * evicts it (closes the socket, freeing the slot for a new connection
+ * attempt). Generous enough for a human to read a shared code and type it;
+ * bounded so a link-only attacker cannot squat the slot forever.
+ */
+export const VIEWER_VERIFY_TIMEOUT_MS = 2 * 60 * 1000;
 
 /** Deploy-time policy knobs (wrangler.jsonc vars); defaults preserved. */
 export interface SessionPolicyEnv {
@@ -95,7 +116,27 @@ export class SessionDurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
     this.state.acceptWebSocket(server, [assignment.role]);
+    if (assignment.role === 'viewer') {
+      // Bound how long an unverified viewer can hold the slot (see class doc).
+      // Overwrites any prior alarm — fine, there is at most one viewer at a time.
+      void this.state.storage.setAlarm(Date.now() + VIEWER_VERIFY_TIMEOUT_MS);
+    }
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * Evict an unverified viewer so a link-only attacker cannot squat the sole
+   * viewer slot forever. No-op if the viewer already verified (or left) —
+   * pinVerified is checked fresh, not assumed from scheduling time.
+   */
+  async alarm(): Promise<void> {
+    const pinVerified = (await this.state.storage.get<boolean>(PIN_VERIFIED_KEY)) === true;
+    if (pinVerified) {
+      return;
+    }
+    for (const ws of this.state.getWebSockets('viewer')) {
+      try { ws.close(4001, 'verification-timeout'); } catch { /* already closed */ }
+    }
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -123,10 +164,16 @@ export class SessionDurableObject {
   }
 
   private async relayMessage(senderRole: PeerRole, message: string | ArrayBuffer): Promise<void> {
-    const targets = this.state.getWebSockets(relayTargetRole(senderRole));
     const pinVerified = (await this.state.storage.get<boolean>(PIN_VERIFIED_KEY)) === true;
 
-    if (targets.length === 0 || (senderRole === 'host' && !pinVerified)) {
+    if (!pinVerified) {
+      // Host's pre-verification offer/ICE is buffered for flush after pin-ok
+      // (below). A viewer's pre-verification messages are never legitimate —
+      // the real viewer's page does not send anything but the PIN control
+      // message until it has received pin-ok — so they are dropped outright
+      // rather than relayed. Relaying them was the hole: an attacker holding
+      // only the link (no PIN) could inject SDP/ICE at the host before ever
+      // proving they know the PIN.
       if (senderRole === 'host' && typeof message === 'string') {
         // Persist to storage — in-memory state does not survive DO hibernation.
         const count = (await this.state.storage.get<number>(PENDING_COUNT_KEY)) ?? 0;
@@ -135,6 +182,7 @@ export class SessionDurableObject {
       }
       return;
     }
+    const targets = this.state.getWebSockets(relayTargetRole(senderRole));
     for (const peer of targets) {
       try { peer.send(message); } catch { /* target WS already closed — drop silently */ }
     }
@@ -194,6 +242,7 @@ export class SessionDurableObject {
 
     // PIN correct — mark verified in persistent storage, then flush buffered SDP/ICE.
     await this.state.storage.put(PIN_VERIFIED_KEY, true);
+    await this.state.storage.deleteAlarm(); // cancel the unverified-viewer eviction timer
     ws.send(JSON.stringify({ type: 'pin-ok' }));
     await this.flushPendingToViewer();
   }

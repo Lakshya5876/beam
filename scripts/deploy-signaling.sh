@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deploy the Beam signaling worker. HUMAN-ONLY, DEPLOY MACHINE ONLY.
 # This script transmits code to Cloudflare — it refuses to run unless
-# explicitly confirmed, so it can never fire accidentally on the governed
-# dev laptop (Architecture Guidelines §3 LOCAL-ONLY).
+# explicitly confirmed, so it can never fire accidentally on the dev
+# laptop (LOCAL-ONLY).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 

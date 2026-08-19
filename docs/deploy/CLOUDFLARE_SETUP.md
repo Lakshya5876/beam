@@ -1,8 +1,8 @@
 # Cloudflare Setup — Signaling Worker + Viewer Pages
 
 Complete, mechanical setup instructions. Run everything in this document on
-the **deploy machine only** — never on the governed dev laptop (Architecture Guidelines §3
-LOCAL-ONLY). Every command is idempotent; re-running is safe.
+the **deploy machine only** — never on the dev laptop (LOCAL-ONLY). Every
+command is idempotent; re-running is safe.
 
 ## 0. Prerequisites
 
@@ -38,14 +38,66 @@ npx wrangler deploy --config wrangler.jsonc
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `ICE_SERVERS` | Google STUN | JSON array of RTCIceServer objects, served publicly at `GET /ice-config` — the viewer fetches this before creating its RTCPeerConnection |
+| `ICE_SERVERS` | Google STUN | JSON array of RTCIceServer objects, served publicly at `GET /ice-config` — **both** peers (viewer page and host CLI) fetch this before creating their peer connection |
 | `MINT_MAX_PER_MINUTE` | `30` | Session-mint rate limit per IP |
 | `PIN_MAX_ATTEMPTS` | `3` | PIN attempts before lockout |
 
-To add TURN later: `ICE_SERVERS` is **public** (anyone can GET /ice-config).
-Never put long-lived TURN credentials there. Use a TURN provider with
-short-lived credentials (e.g. Cloudflare Calls TURN, Twilio NTS) and rotate,
-or add an authenticated credential endpoint first.
+`ICE_SERVERS` is **public** — anyone can `GET /ice-config`. Never put a
+long-lived TURN credential there; it is served verbatim to whoever asks. TURN
+belongs in the minting configuration below instead, which hands out
+short-lived credentials and keeps the account secret server-side.
+
+## 1b. Enable TURN (strongly recommended)
+
+Without TURN, Beam is STUN-only: it connects on most networks but **fails
+outright on symmetric NAT and CGNAT** (common on corporate Wi-Fi and mobile
+carriers). With TURN configured, ICE falls back to a relay automatically and
+only when a direct path cannot be established — direct P2P remains preferred.
+
+Beam ships a Metered Open Relay provider (free tier: 20 GB/month). The
+integration sits behind a provider-neutral seam (`signaling/src/turn-provider.ts`),
+so coturn or another provider can replace it without touching Beam's WebRTC path.
+
+1. Create an account at `dashboard.metered.ca` and note your **app name** (the
+   `<app>` in `https://<app>.metered.live`) and your **secret key**.
+2. Set the app name as a var and the secret as a **secret** (never in
+   `wrangler.jsonc`, which is committed):
+
+```bash
+npx wrangler secret put METERED_SECRET_KEY --config signaling/wrangler.jsonc
+```
+
+Add `"METERED_APP_NAME": "<your-app>"` to the `vars` block in
+`signaling/wrangler.jsonc`, then redeploy.
+
+3. **Do the same for the viewer deployment.** The merged Pages worker serves
+   `/ice-config` on the origin both peers actually talk to, so configuring only
+   the standalone signaling Worker leaves the real path STUN-only:
+
+```bash
+npx wrangler pages secret put METERED_SECRET_KEY
+```
+
+Optional: `TURN_TTL_SECONDS` (default `14400` = 4h) sets how long a minted
+credential lives.
+
+Verify it took effect — the header is the authoritative signal:
+
+```bash
+curl -si $SIGNALING_URL/ice-config | grep -i x-beam-turn
+# x-beam-turn: available        → TURN is working
+# x-beam-turn: not-configured   → no provider set (STUN-only)
+# x-beam-turn: provider-rejected / provider-unreachable / malformed-response
+#                               → configured but the provider call failed;
+#                                 Beam degrades to STUN-only rather than
+#                                 failing the session
+```
+
+To confirm a relay actually carries a session end to end:
+
+```bash
+BEAM_E2E_TURN_APP=<app> BEAM_E2E_TURN_SECRET=<secret> node e2e-connection.mjs --all
+```
 
 ### Verify the worker
 

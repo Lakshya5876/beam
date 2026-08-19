@@ -1,0 +1,4 @@
+.githooks/covenantwin.py text eol=lf
+.githooks/pre-commit text eol=lf
+.githooks/pre-push text eol=lf
+.claude/hooks/pre_bash_trust_root_guard.sh text eol=lf

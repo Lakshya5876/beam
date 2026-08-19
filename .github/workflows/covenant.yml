@@ -1,0 +1,79 @@
+# CI parity covenant — installed by CovenantWin's install.ps1 into .github/workflows/covenant.yml
+# Runs the committed covenantwin.py in CI mode so a hook-stripped clone (a developer who deleted
+# .githooks or pushed with --no-verify) still cannot merge unverified code.
+name: governance-covenant
+
+on:
+  pull_request:
+    branches: [main, master, develop, "release/**", production]
+  push:
+    branches: [main, master, develop, "release/**", production]
+
+permissions:
+  contents: read
+
+jobs:
+  covenant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history - covenant needs diff range)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Verify governance files are present, unmodified, and integrity-pinned
+        run: python .githooks/covenantwin.py check-integrity .
+
+      - name: Resolve base SHA for diff scope
+        id: base_sha
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install target-repo dependencies (best-effort, language-agnostic)
+        run: |
+          set -uo pipefail
+          [ -f requirements.txt ] && pip install -r requirements.txt
+          [ -f pyproject.toml ] && pip install -e . || true
+          [ -f package-lock.json ] && npm ci
+          [ -f package.json ] && [ ! -f package-lock.json ] && npm install
+          true
+
+      - name: Seed CI-local covenant state (commands config — the real state file is gitignored/machine-local)
+        run: |
+          mkdir -p .claude
+          cat > .claude/covenant_state.json <<'JSON'
+          {
+            "framework_version": "1.0.0-win",
+            "last_pass_sha": {},
+            "last_pass_timestamp": null,
+            "thresholds": { "coverage_pct": 80, "complexity_max": 10, "command_timeout_sec": 30 },
+            "core_files": [],
+            "receipts": {},
+            "token": { "token_budget": null, "token_spent_today": 0, "token_last_reset": null, "token_audit_log": [] },
+            "commands": {
+              "lint": "npm run lint",
+              "type": "npm run typecheck && npm --prefix signaling run typecheck && npm --prefix viewer run typecheck",
+              "test": "npm test && npm --prefix signaling test && npm --prefix viewer test",
+              "coverage": null,
+              "complexity": null,
+              "frontend_lint": null,
+              "frontend_type": null
+            }
+          }
+          JSON
+
+      - name: Run governance covenant (mechanical - tests forced on in CI)
+        env:
+          COVENANT_TRIGGER: ci
+          RUN_TESTS: "true"
+          CI_BASE_SHA: ${{ steps.base_sha.outputs.sha }}
+        run: python .githooks/covenantwin.py covenant --trigger ci

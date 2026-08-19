@@ -34,6 +34,16 @@ export interface SignalingSocket {
 
 export type ConnectionState = 'connecting' | 'connected' | 'failed';
 
+/** How long a 'disconnected' state is given to self-recover before being
+ *  treated as terminal — see handleConnectionStateChange's comment. Real
+ *  interactive Ctrl-C testing against production showed connectionState can
+ *  settle at 'disconnected' indefinitely (observed: no transition to
+ *  'failed' even after several minutes) — browsers are not guaranteed to
+ *  make that transition promptly, or at all, just because the remote peer
+ *  is genuinely gone. Without this timer, onTerminalFailure would never
+ *  fire for that real-world case at all. */
+const DISCONNECT_GRACE_MS = 10_000;
+
 export interface ViewerConnectionOptions {
   /**
    * Drop IPv6 ICE candidates on both sides — mirrors PeerConnectionTransport's
@@ -63,6 +73,8 @@ export class ViewerConnection {
   private pendingCandidates: IceCandidate[] = [];
   private connectionState: ConnectionState = 'connecting';
   private stateHandlers: Array<(state: ConnectionState) => void> = [];
+  private terminalHandlers: Array<() => void> = [];
+  private disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
   private muxHandlers: Array<(mux: StreamMultiplexer) => void> = [];
   private closeHandlers: Array<(openStreamIds: number[]) => void> = [];
   private readonly ipv4Only: boolean;
@@ -194,10 +206,43 @@ export class ViewerConnection {
 // console.log(`[VIEWER] connectionstatechange: ${state}`);
     if (state === 'connected') {
       this.connectionState = 'connected';
+      this.clearDisconnectGraceTimer(); // a real recovery — cancel any pending terminal grace period
       for (const handler of this.stateHandlers) handler('connected');
     } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
       this.connectionState = 'failed';
       for (const handler of this.stateHandlers) handler('failed');
+      // 'failed' and 'closed' don't self-recover per the WebRTC spec, and
+      // critically, nothing in this class ever calls peer.close() in
+      // response to a remote disconnect — so the data channel's own 'close'
+      // event (transport.onClose, wired to onclose() below) is not
+      // guaranteed to fire on its own after 'failed'. Terminal listeners are
+      // the only reliable signal bootstrap has to finalize a session that
+      // already succeeded and then definitively ended.
+      if (state === 'failed' || state === 'closed') {
+        this.clearDisconnectGraceTimer();
+        this.fireTerminal();
+      } else if (this.disconnectGraceTimer === null) {
+        // 'disconnected' CAN self-recover, so it isn't fired as terminal
+        // immediately — but it must not be trusted to progress to 'failed'
+        // on its own either (see DISCONNECT_GRACE_MS's doc). Give it a
+        // bounded window to recover; if 'connected' doesn't fire again
+        // before the timer elapses, treat it as terminal anyway.
+        this.disconnectGraceTimer = setTimeout(() => {
+          this.disconnectGraceTimer = null;
+          this.fireTerminal();
+        }, DISCONNECT_GRACE_MS);
+      }
+    }
+  }
+
+  private fireTerminal(): void {
+    for (const handler of this.terminalHandlers) handler();
+  }
+
+  private clearDisconnectGraceTimer(): void {
+    if (this.disconnectGraceTimer !== null) {
+      clearTimeout(this.disconnectGraceTimer);
+      this.disconnectGraceTimer = null;
     }
   }
 
@@ -250,6 +295,18 @@ export class ViewerConnection {
     return () => {
       const idx = this.closeHandlers.indexOf(handler);
       if (idx >= 0) this.closeHandlers.splice(idx, 1);
+    };
+  }
+
+  /** Fires only for a definitively terminal connection state ('failed' or
+   *  'closed') — never for a transient 'disconnected', which can self-recover.
+   *  See the comment in handleConnectionStateChange for why this exists
+   *  separately from onclose(). */
+  onTerminalFailure(handler: () => void): Unsubscribe {
+    this.terminalHandlers.push(handler);
+    return () => {
+      const idx = this.terminalHandlers.indexOf(handler);
+      if (idx >= 0) this.terminalHandlers.splice(idx, 1);
     };
   }
 

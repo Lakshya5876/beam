@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderConnecting, renderFailed, renderUnsupported, renderPinEntry, renderPinFailed, renderPinLocked } from '../src/pages.js';
+import { renderConnectedShell, renderConnecting, renderFailed, renderUnsupported, renderPinEntry, renderPinFailed, renderPinLocked } from '../src/pages.js';
 
 describe('pages (pure render helpers)', () => {
   it('renders unsupported browser message', () => {
@@ -18,6 +18,13 @@ describe('pages (pure render helpers)', () => {
     const html = renderFailed('timeout');
     expect(html).toContain('failed');
     expect(html).toContain('timeout');
+  });
+
+  it('renders the connected shell as an iframe (no src set — bootstrap sets it after mount)', () => {
+    const html = renderConnectedShell();
+    expect(html).toContain('<iframe');
+    expect(html).toContain('id="beam-frame"');
+    expect(html).not.toContain('src=');
   });
 });
 

@@ -12,8 +12,11 @@
 import { parseArgs } from 'node:util';
 import { randomInt, createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { composeHost, type HostOptions, type HostRuntime } from '../composition.js';
-import { loadConfig, type BeamConfig } from '../config.js';
+import { pathToFileURL } from 'node:url';
+import { composeHost, composeHostIceServers, type HostOptions, type HostRuntime } from '../composition.js';
+import { loadConfig, type BeamConfig, type IceTransportPolicy } from '../config.js';
+import { parseIceServersEnv } from '../application/ice-servers.js';
+import type { IceServerConfig } from '../domain/interfaces.js';
 import { createTimestampedLogger, describeSessionEvent } from './debug-log.js';
 
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: CliUsageError };
@@ -29,12 +32,17 @@ function pErr<T>(error: CliUsageError): Parsed<T> {
 export type CliParseResult = Parsed<CliOptions>;
 
 /**
- * Compiled-in fallbacks. PLACEHOLDER-DEFAULT: these are NOT live endpoints —
- * the release checklist (docs/deploy/RELEASE_CHECKLIST.md) requires replacing
- * them with the real deployed URLs before `npm publish`. Resolution order at
- * runtime: CLI flag > BEAM_SIGNALING_URL / BEAM_VIEWER_URL env > these.
+ * Compiled-in fallbacks — the real, deployed, verified-working endpoints, so
+ * `bm <port>` with zero flags works out of the box (the non-negotiable "user
+ * runs a command" UX). Both point at the SAME origin deliberately: the
+ * merged Pages Advanced-Mode worker (viewer/_worker-src/entry.ts) serves
+ * signaling from the same origin as the static viewer bundle, which is what
+ * makes the WebSocket upgrade reach a *.pages.dev domain instead of a
+ * separate *.workers.dev one — some mobile carriers were observed blocking
+ * the latter (see LIMITATIONS.md). Resolution order at runtime: CLI flag >
+ * BEAM_SIGNALING_URL / BEAM_VIEWER_URL env > these.
  */
-export const DEFAULT_SIGNALING_URL = 'wss://signal.beam.workers.dev';
+export const DEFAULT_SIGNALING_URL = 'wss://beam-viewer.pages.dev';
 export const DEFAULT_VIEWER_URL = 'https://beam-viewer.pages.dev';
 
 export const USAGE =
@@ -46,7 +54,7 @@ export interface CliOptions {
   readonly ttlMs?: number;
   readonly signalingUrl?: string;
   readonly viewerUrl?: string;
-  readonly iceServers?: readonly string[];
+  readonly iceServers?: readonly IceServerConfig[];
   readonly ipv4Only?: boolean;
   readonly debug?: boolean;
 }
@@ -113,14 +121,16 @@ function assembleOptions(
   values: { readonly 'allowed-paths'?: string; readonly signaling?: string; readonly viewer?: string; readonly ice?: string; readonly 'ipv4-only'?: boolean; readonly debug?: boolean },
   ttlMs: number | undefined,
 ): CliOptions {
-  const iceServers = splitList(values.ice);
+  // --ice takes the same comma-separated URL form as BEAM_ICE_SERVERS; both
+  // are merged with whatever /ice-config serves (see composeHostIceServers).
+  const iceServers = values.ice !== undefined ? parseIceServersEnv(values.ice) : [];
   return {
     allowedPaths: splitList(values['allowed-paths']) ?? [],
     ...(localUrl !== undefined && { localUrl }),
     ...(ttlMs !== undefined && { ttlMs }),
     ...(values.signaling !== undefined && { signalingUrl: values.signaling }),
     ...(values.viewer !== undefined && { viewerUrl: values.viewer }),
-    ...(iceServers !== undefined && { iceServers }),
+    ...(iceServers.length > 0 && { iceServers }),
     ...(values['ipv4-only'] === true && { ipv4Only: true }),
     ...(values.debug === true && { debug: true }),
   };
@@ -174,6 +184,12 @@ export interface CliIO {
   error(line: string): void;
   onSigint(handler: () => void): void;
   composeRuntime(options: HostOptions): HostRuntime;
+  /** Fetch the session's ICE servers from the signaling origin, merged with
+   *  anything pinned locally. Never fails the run — see composeHostIceServers. */
+  resolveIceServers(
+    signalingUrl: string,
+    configured: readonly IceServerConfig[] | undefined,
+  ): Promise<readonly IceServerConfig[] | undefined>;
   promptLocalUrl(): Promise<string>;
   generatePin(): string;
 }
@@ -184,6 +200,7 @@ function defaultIO(): CliIO {
     error: (line) => process.stderr.write(`${line}\n`),
     onSigint: (handler) => process.on('SIGINT', handler),
     composeRuntime: (options) => composeHost(options),
+    resolveIceServers: (signalingUrl, configured) => composeHostIceServers(signalingUrl, configured),
     promptLocalUrl(): Promise<string> {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       return new Promise<string>((resolve) => {
@@ -273,9 +290,10 @@ async function startSession(
 export interface ResolvedEndpoints {
   readonly signalingUrl: string;
   readonly viewerUrl: string;
-  readonly iceServers?: readonly string[];
+  readonly iceServers?: readonly IceServerConfig[];
   readonly mintTimeoutMs: number;
   readonly nativeLogLevel?: string;
+  readonly iceTransportPolicy?: IceTransportPolicy;
 }
 
 export function resolveEndpoints(options: CliOptions, config: BeamConfig): ResolvedEndpoints {
@@ -286,6 +304,7 @@ export function resolveEndpoints(options: CliOptions, config: BeamConfig): Resol
     ...(iceServers !== undefined && { iceServers }),
     mintTimeoutMs: config.mintTimeoutMs,
     ...(config.nativeLogLevel !== undefined && { nativeLogLevel: config.nativeLogLevel }),
+    ...(config.iceTransportPolicy !== undefined && { iceTransportPolicy: config.iceTransportPolicy }),
   };
 }
 
@@ -296,6 +315,7 @@ function buildHostOptions(port: number, options: CliOptions, resolved: ResolvedE
     allowedPaths: options.allowedPaths,
     ...(resolved.iceServers !== undefined && { iceServers: resolved.iceServers }),
     ...(resolved.nativeLogLevel !== undefined && { nativeLogLevel: resolved.nativeLogLevel }),
+    ...(resolved.iceTransportPolicy !== undefined && { iceTransportPolicy: resolved.iceTransportPolicy }),
     ...(options.ipv4Only === true && { ipv4Only: true }),
     ...(options.debug === true && { debug: true, log: createTimestampedLogger((line) => { io.error(line); }) }),
   };
@@ -327,7 +347,30 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO(), env:
 
   const pin = io.generatePin();
   const resolved = resolveEndpoints(options, loadConfig(env));
-  const runtime = io.composeRuntime(buildHostOptions(port, options, resolved, io));
+
+  // Armed BEFORE any network work below: fetching ICE config is a real
+  // request with a multi-second timeout, and Ctrl-C during it must still
+  // quit rather than appear to hang. The runtime does not exist yet at this
+  // point, so the handler closes it only once there is something to close.
+  let runtime: HostRuntime | null = null;
+  let interrupted = false;
+  io.onSigint(() => {
+    interrupted = true;
+    if (runtime) {
+      void runtime.close('host interrupted (SIGINT)');
+    }
+  });
+
+  // Pull ICE servers (including any server-minted TURN credentials) from the
+  // signaling origin before the peer is constructed — the host needs the same
+  // relay candidates the viewer gets, or the TURN fallback is one-sided.
+  const iceServers = await io.resolveIceServers(resolved.signalingUrl, resolved.iceServers);
+  if (interrupted) {
+    return 0;
+  }
+  runtime = io.composeRuntime(
+    buildHostOptions(port, options, { ...resolved, ...(iceServers !== undefined && { iceServers }) }, io),
+  );
   // Connection status lines: connecting is implicit; established/failed/closed
   // print as they happen instead of leaving the user staring at silence.
   runtime.session.onEvent((event) => {
@@ -336,15 +379,19 @@ export async function run(argv: readonly string[], io: CliIO = defaultIO(), env:
       io.write(line);
     }
   });
-  io.onSigint(() => {
-    void runtime.close('host interrupted (SIGINT)');
-  });
   await startSession(runtime, resolved.signalingUrl, resolved.viewerUrl, pin, io, resolved.mintTimeoutMs, options.ipv4Only === true);
   return 0;
 }
 
-// Entry point: only run when this module is the entry point.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Entry point: only run when this module is the entry point. Comparing
+// import.meta.url against a manually-concatenated `file://${argv[1]}` breaks
+// on Windows — process.argv[1] is a raw Windows path (D:\a\b.js), not a
+// properly encoded file URL (file:///D:/a/b.js), so they never matched and
+// run() silently never fired for ANY direct Windows invocation (the real
+// published `bm` binary included) — the process loaded and exited doing
+// nothing, no error, no output. pathToFileURL() does the OS-correct
+// conversion (drive letter, backslash-to-slash, encoding) on every platform.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   run(process.argv.slice(2))
     .then((code) => {
       if (code !== 0) {

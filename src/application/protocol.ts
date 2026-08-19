@@ -94,8 +94,21 @@ interface StreamState {
   bufferedBytes: number;
 }
 
+/** Closes a half outright: no more frames expected on it (HTTP) / the WS connection is done. */
 function isEndFrame(type: FrameType): boolean {
-  return type === FrameType.REQUEST_END || type === FrameType.RESPONSE_END;
+  return type === FrameType.REQUEST_END || type === FrameType.RESPONSE_END || type === FrameType.WS_CLOSE;
+}
+
+/**
+ * Releases this stream's buffered-byte accounting WITHOUT closing the half —
+ * a WS connection stays open across many messages, so "buffered bytes"
+ * must be scoped to the CURRENT message (bounding any single message's size)
+ * rather than accumulating for the connection's whole lifetime, or a
+ * long-lived, healthy WS connection would eventually trip the stream/total
+ * buffer caps on cumulative traffic alone.
+ */
+function releasesBufferOnly(type: FrameType): boolean {
+  return type === FrameType.WS_MESSAGE_END;
 }
 
 export class StreamMultiplexer {
@@ -181,6 +194,10 @@ export class StreamMultiplexer {
   /**
    * Inbound entry — total: every frame yields ok or a typed rejection, never
    * throws. Wired to transport.onFrame in the constructor.
+   *
+   * Buffered bytes accumulate until an end frame OR until the consumer calls
+   * releaseInbound — see that method for why the choice belongs to the
+   * consumer rather than being automatic here.
    */
   acceptInbound(frame: Frame): Result<undefined, StreamRejectedError> {
     const routed = this.routeInbound(frame);
@@ -188,6 +205,36 @@ export class StreamMultiplexer {
       this.deliver(frame);
     }
     return routed;
+  }
+
+  /**
+   * Give back the accounting for a frame the consumer has finished with.
+   *
+   * The caps exist to stop a peer from making THIS side hold unbounded data,
+   * so they must count what is actually still held — which only the consumer
+   * knows. The two consumers differ:
+   *
+   *   - The host accumulates REQUEST_* frames until REQUEST_END before it can
+   *     assemble them, so it genuinely holds every byte. It does NOT release,
+   *     and the caps bound how much a viewer can make it buffer. Unchanged.
+   *   - The viewer forwards each RESPONSE_* frame straight to the service
+   *     worker and keeps nothing, so counting those bytes measured cumulative
+   *     TRANSFER, not buffering. That silently capped any single HTTP response
+   *     at maxStreamBufferBytes (1 MiB): a larger response tripped the cap
+   *     mid-body and was killed, so an ordinary JS bundle or image could not
+   *     traverse the tunnel at all. It releases as it forwards.
+   *
+   * Clamped, so a stream already released by an end frame cannot go negative,
+   * and releasing an unknown/retired stream is a no-op.
+   */
+  releaseInbound(frame: Frame): void {
+    const stream = this.streams.get(frame.streamId);
+    if (!stream) {
+      return;
+    }
+    const release = Math.min(frame.payload.byteLength, stream.bufferedBytes);
+    stream.bufferedBytes -= release;
+    this.totalBuffered -= release;
   }
 
   onInbound(handler: (frame: Frame) => void): Unsubscribe {
@@ -263,14 +310,34 @@ export class StreamMultiplexer {
     this.totalBuffered += size;
     if (isEndFrame(frame.type)) {
       this.closeInbound(id);
+    } else if (releasesBufferOnly(frame.type)) {
+      this.totalBuffered -= stream.bufferedBytes;
+      stream.bufferedBytes = 0;
     }
     return ok();
   }
 
+  /**
+   * Kill a stream that breached a cap. The ERROR frame goes to the PEER, but
+   * the local side must be told too: whoever is awaiting this stream (the
+   * service worker's pending fetch, the host's relay loop) would otherwise
+   * wait for a response that can no longer arrive and only give up on its own
+   * timeout — a 30-second hang instead of an immediate, explained failure.
+   */
   private terminate(id: StreamId, reason: StreamRejectionReason): Result<undefined, StreamRejectedError> {
     this.emitError(id, reason);
     this.forceClose(id);
+    this.deliverLocalError(id, reason);
     return err({ error: 'StreamRejected', streamId: id, reason });
+  }
+
+  /** Synthesize the ERROR frame locally so inbound handlers see the failure. */
+  private deliverLocalError(streamId: StreamId, reason: StreamRejectionReason): void {
+    const payload = createFramePayload(new TextEncoder().encode(reason));
+    if (isPayloadTooLargeError(payload)) {
+      return;
+    }
+    this.deliver({ type: FrameType.ERROR, streamId, payload });
   }
 
   /** Close the inbound half: release its buffered bytes exactly once. */

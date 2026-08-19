@@ -9,17 +9,16 @@
  */
 
 import { routeRequest } from './router.js';
-import { iceConfigBody } from './ice-config.js';
+import { handleIceConfig, type TurnEnv } from './ice-config-route.js';
+import { handleTelemetry, type TelemetryEnv } from './telemetry-route.js';
 import type { SessionPolicyEnv } from './session-do.js';
 
 // The DO class must be exported from the Worker entrypoint (Cloudflare binds
 // it by class name from wrangler.jsonc).
 export { SessionDurableObject } from './session-do.js';
 
-export interface Env extends SessionPolicyEnv {
+export interface Env extends SessionPolicyEnv, TurnEnv, TelemetryEnv {
   SESSIONS: DurableObjectNamespace;
-  /** Optional JSON array of RTCIceServer objects (see ice-config.ts). */
-  ICE_SERVERS?: string;
 }
 
 // The single registry instance that mints codes and holds the used-token set.
@@ -33,15 +32,11 @@ export default {
       return new Response(decision.reason, { status: decision.status });
     }
     if (decision.kind === 'ice-config') {
-      // Public, non-sensitive by policy (ice-config.ts); CORS-open so the
-      // Pages-origin viewer can fetch it.
-      return new Response(iceConfigBody(env.ICE_SERVERS), {
-        headers: {
-          'content-type': 'application/json',
-          'access-control-allow-origin': '*',
-          'cache-control': 'no-store',
-        },
-      });
+      // STUN always; TURN appended when configured (ice-config-route.ts).
+      return handleIceConfig(env, fetch, Date.now());
+    }
+    if (decision.kind === 'telemetry') {
+      return handleTelemetry(request, env);
     }
     const name = decision.kind === 'mint' ? REGISTRY_NAME : decision.code;
     const stub = env.SESSIONS.get(env.SESSIONS.idFromName(name));

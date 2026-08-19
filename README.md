@@ -3,11 +3,10 @@
 Expose your localhost server to a remote browser peer over a direct WebRTC data channel — no cloud relay, no server costs, no account required.
 
 ```
-npm install -g @beamtunnel/cli
+npm install -g beam-tunnel
 
-bm 3000
-# or
-bm http://localhost:3000
+bm
+  Enter local URL (e.g. http://localhost:3000): 3000
 
   Viewer URL:   https://beam-viewer.pages.dev/?signaling=...
   Session code: 482 913
@@ -15,7 +14,7 @@ bm http://localhost:3000
   Share both with your viewer. Press Ctrl-C to end the session.
 ```
 
-The viewer opens the URL in Chrome, enters the 6-digit code, and from that point every HTTP request they make is forwarded — peer-to-peer — to your local server and back.
+The viewer opens the URL in a Chromium-based browser (Chrome, Edge — see Platform support below), enters the 6-digit code, and from that point every HTTP request they make is forwarded — peer-to-peer — to your local server and back, on their own machine, as if they were on yours.
 
 ---
 
@@ -34,33 +33,72 @@ Your local server
 1. `bm` connects to the signaling server, mints a session code, and prints the viewer URL.
 2. The viewer opens the URL, enters the code. The DO verifies the PIN (SHA-256 hash comparison) and relays the WebRTC offer/answer.
 3. ICE negotiation completes; a direct DataChannel opens — no relay traffic touches the signaling server after this point.
-4. Every browser fetch goes through a service worker, serialised into Beam frames, sent over the DataChannel, replayed to `127.0.0.1`, and the response streamed back.
+4. The viewer shell embeds your app in an iframe and points it at your app's real root page. A service worker intercepts every fetch the iframe (or your app's own JS) makes, serialises it into Beam frames, sends it over the DataChannel, replays it to `127.0.0.1`, and streams the response back — so full page navigations inside your app work normally, without ever tearing down the tunnel.
+5. `new WebSocket(...)` calls in your app are relayed too: an injected script replaces `WebSocket` inside the iframe (a service worker cannot intercept the WebSocket constructor the way it intercepts `fetch()`), routing frames over the same DataChannel to a real WebSocket the host dials against your local server.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full design walkthrough.
 
 ---
 
+## Platform support
+
+**Host: Windows only, for now.** Beam has not been built, tested, or verified
+on macOS or Linux in this release — treat those as unsupported rather than
+assumed-working, even though nothing in the architecture is Windows-specific
+by design.
+
+**Viewer: Chromium-based browsers only** (Chrome, Edge, and other
+Chromium-family browsers, on any OS). Confirmed working end-to-end on real
+hardware across a real cross-device, cross-network connection: Windows host →
+Android Chrome viewer on mobile data. Automated coverage (`e2e-app-compat.mjs`)
+additionally verifies the full request/response surface on Chrome and Edge on
+Windows.
+
+**Does not currently work: WebKit-based browsers** — this means Safari on any
+platform, and **every** browser on iOS/iPadOS (Apple requires all iOS browsers,
+including Chrome and Firefox for iOS, to use WebKit underneath). Confirmed via
+a real device test: the WebRTC connection itself succeeds
+(`DataChannel OPEN`), but the page never loads — WebKit has a known gap in
+Service-Worker interception of iframe navigation, which the viewer's
+architecture depends on. This is a real, verified limitation, not a guess;
+see LIMITATIONS.md for the mechanism.
+
+Firefox has not been tested in this release.
+
 ## Installation
 
 ```bash
-npm install -g @beamtunnel/cli     # requires Node >= 22
+npm install -g beam-tunnel     # requires Node >= 22
 
 # From source
 git clone https://github.com/Lakshya5876/beam
 cd beam && npm ci && npm run build
 ```
 
-> **Verify the npm package name** — confirm `@beamtunnel/cli` is unclaimed before publishing.
+> **Not yet published.** `beam-tunnel` is confirmed unclaimed on the npm registry as of the last check, but availability can change — re-verify (`npm view beam-tunnel`) immediately before running `npm publish`.
 
 ---
 
 ## Usage
 
+Run `bm` with no arguments and it asks for your local server address
+interactively — nothing to remember, nothing to look up:
+
+```
+bm
+  Enter local URL (e.g. http://localhost:3000): 3000
+```
+
+The prompt accepts any of `3000`, `localhost:3000`, or `http://localhost:3000`.
+For scripting or repeat use, the same value can be passed directly as an
+argument instead, skipping the prompt: `bm 3000`.
+
 ```
 bm [<local-url>] [options]
 
 Arguments:
-  <local-url>   Local server address. Accepts any of:
+  <local-url>   Local server address (optional — prompted for if omitted).
+                Accepts any of:
                   3000                    → http://localhost:3000
                   localhost:3000          → http://localhost:3000
                   http://localhost:3000   → as-is
@@ -126,9 +164,10 @@ bm 3000 --ipv4-only
 ## Security model
 
 - **Authentication**: every session requires a 6-digit PIN. The host generates it locally (CSPRNG); only its SHA-256 hash is registered with the signaling server. A brute-force attempt against a 6-digit PIN succeeds with probability < 0.003 % on the first try.
-- **Path restriction**: use `--allowed-paths` to limit exposure. Without it, every route on the target port is reachable by anyone who holds the link and code.
+- **No signaling before verification**: the signaling Durable Object relays nothing — in either direction — until the PIN is verified. Holding the link alone is not enough to see or inject any WebRTC signaling. An unverified second connection to a session (someone who has the link but not the PIN) is evicted automatically after 2 minutes so it cannot permanently occupy the session and lock out the real viewer.
+- **Path restriction**: use `--allowed-paths` to limit exposure — it also gates WebSocket connections, not just HTTP. Without it, every route on the target port is reachable by anyone who holds the link and code.
 - **No relay after connection**: once the WebRTC data channel is open, no traffic transits the signaling server. Cloudflare Workers cannot read your data.
-- **Loopback confinement**: the host always connects to `127.0.0.1:<port>`. Viewer-supplied headers cannot redirect requests to other hosts or ports.
+- **Loopback confinement**: the host always connects to `127.0.0.1:<port>`, for both HTTP and WebSocket relay. Viewer-supplied headers cannot redirect requests to other hosts or ports.
 - **Injection guards**: CR/LF in method, path, or any header value is rejected before any socket write. Path traversal segments (`..`, `%2e%2e`) are blocked.
 
 See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
@@ -137,10 +176,10 @@ See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
 
 ## Limitations
 
-- **SPA / client-side routing only** — top-level navigations reload the page and drop the connection. Server-side rendered apps with full page navigations are not supported in v1.
-- **No TURN relay** — ~10–15 % failure rate on symmetric NAT (corporate networks, some mobile carriers).
-- **No WebSocket proxying** — WebSocket upgrade requests are not intercepted.
-- **Chrome recommended** — the viewer service worker is tested in Chrome. Firefox and Safari have known SW + WebRTC compatibility gaps.
+- **TURN relay must be configured per deployment** — Beam prefers a direct peer-to-peer path and falls back to a TURN relay automatically when ICE cannot find one (symmetric NAT, CGNAT). The fallback only exists if the deployment supplies TURN credentials; without them the deployment is STUN-only and still fails on those networks. Setup is in `docs/deploy/CLOUDFLARE_SETUP.md`. Verified against a live Metered account: `path=direct` on a normal network, `path=relay` when forced through the relay (real HTTP request relayed through it), and a deterministic failure when neither is available — see LIMITATIONS.md.
+- **WebSocket relay has caveats** — supported (HMR, chat, realtime apps all work), but the browser's `WebSocket` API doesn't expose cookies as headers, so the loopback WS handshake doesn't carry the browser's cookies. Apps that gate a WS connection on cookie session auth won't authenticate over the relay.
+- **HTML shim injection is skipped for compressed responses** — a `Content-Encoding: gzip/br/deflate` HTML response is relayed byte-for-byte unmodified (correctly), but without the WebSocket shim, so `new WebSocket()` calls on that page won't be relayed.
+- **Windows-only host, Chromium-only viewer, for now** — see "Platform support" above for exactly what is and isn't verified, including the WebKit/iOS gap found via real device testing.
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full details.
 
@@ -150,7 +189,7 @@ See [LIMITATIONS.md](LIMITATIONS.md) for full details.
 
 ```bash
 npm ci
-npx vitest run          # 238 tests, ~1s
+npx vitest run          # ~1s (run in signaling/ and viewer/ too — 3 independent packages)
 npm run lint            # eslint
 npm run typecheck       # tsc --noEmit
 npm run build           # dist/ for publishing

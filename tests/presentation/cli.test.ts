@@ -102,7 +102,12 @@ describe('parseCliArgs', () => {
     const result = parseCliArgs(['--ice', 'stun:s.example.com:3478,turn:u:p@t.example.com:3478']);
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.value.iceServers).toEqual(['stun:s.example.com:3478', 'turn:u:p@t.example.com:3478']);
+      // Inline credentials are split out of the url — a minted password can
+      // contain ':' or '@', so they never travel packed into the url.
+      expect(result.value.iceServers).toEqual([
+        { urls: 'stun:s.example.com:3478' },
+        { urls: 'turn:t.example.com:3478', username: 'u', credential: 'p' },
+      ]);
     }
   });
 
@@ -247,6 +252,8 @@ function fakeIO(promptUrl = 'http://localhost:3000'): {
       composedWith.push(options);
       return runtime;
     },
+    // The real one fetches /ice-config; these cases assert CLI wiring, not ICE.
+    resolveIceServers: (_signalingUrl, configured) => Promise.resolve(configured),
     promptLocalUrl: () => Promise.resolve(promptUrl),
     generatePin: () => '847291',
   };
@@ -281,14 +288,40 @@ describe('run', () => {
   });
 
   it('SIGINT triggers runtime.close', async () => {
-    const { io, fireSigint, closedWith } = fakeIO();
+    const { io, fireSigint, closedWith, composedWith } = fakeIO();
     const runPromise = run([], io);
-    // promptLocalUrl() is async even with Promise.resolve(); one microtask yield
-    // lets run() advance past the await and register the SIGINT handler.
-    await Promise.resolve();
+    // run() awaits the local-URL prompt and then the ICE-config fetch before
+    // the runtime exists. Wait for the runtime to actually be composed rather
+    // than counting microtasks, so adding an await upstream cannot silently
+    // turn this into a no-op assertion.
+    while (composedWith.length === 0) {
+      await Promise.resolve();
+    }
     fireSigint();
     await runPromise;
     expect(closedWith).toEqual(['host interrupted (SIGINT)']);
+  });
+
+  it('SIGINT during the ICE-config fetch exits cleanly without composing a runtime', async () => {
+    // The fetch has a multi-second timeout; Ctrl-C in that window must quit
+    // rather than appear to hang until the request settles.
+    let releaseIce: (() => void) | undefined;
+    const { io, fireSigint, closedWith, composedWith } = fakeIO();
+    const gated: CliIO = {
+      ...io,
+      resolveIceServers: () => new Promise((resolve) => {
+        releaseIce = () => resolve(undefined);
+      }),
+    };
+    const runPromise = run([], gated);
+    while (releaseIce === undefined) {
+      await Promise.resolve();
+    }
+    fireSigint();
+    releaseIce();
+    await expect(runPromise).resolves.toBe(0);
+    expect(composedWith).toEqual([]);
+    expect(closedWith).toEqual([]);
   });
 });
 
@@ -314,7 +347,7 @@ describe('resolveEndpoints — flag > env > compiled default', () => {
     );
     expect(resolved.signalingUrl).toBe('wss://env.example.com');
     expect(resolved.viewerUrl).toBe('https://env-view.example.com');
-    expect(resolved.iceServers).toEqual(['stun:env.example.com:3478']);
+    expect(resolved.iceServers).toEqual([{ urls: 'stun:env.example.com:3478' }]);
   });
 
   it('CLI flags override env', () => {
@@ -323,7 +356,7 @@ describe('resolveEndpoints — flag > env > compiled default', () => {
         allowedPaths: [],
         signalingUrl: 'wss://flag.example.com',
         viewerUrl: 'https://flag-view.example.com',
-        iceServers: ['stun:flag.example.com:3478'],
+        iceServers: [{ urls: 'stun:flag.example.com:3478' }],
       },
       loadConfig({
         BEAM_SIGNALING_URL: 'wss://env.example.com',
@@ -333,6 +366,6 @@ describe('resolveEndpoints — flag > env > compiled default', () => {
     );
     expect(resolved.signalingUrl).toBe('wss://flag.example.com');
     expect(resolved.viewerUrl).toBe('https://flag-view.example.com');
-    expect(resolved.iceServers).toEqual(['stun:flag.example.com:3478']);
+    expect(resolved.iceServers).toEqual([{ urls: 'stun:flag.example.com:3478' }]);
   });
 });

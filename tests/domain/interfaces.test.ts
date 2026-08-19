@@ -125,14 +125,11 @@ class FakeSignalingClient implements SignalingClient {
 }
 
 const fakeReplayClient: ReplayClient = {
-  replay(request: ReplayRequest) {
-    return Promise.resolve(
-      ok({
-        status: request.path === '/missing' ? 404 : 200,
-        headers: { 'content-type': 'text/plain' },
-        body: new TextEncoder().encode(`${request.method} ${request.path}`),
-      }),
-    );
+  async replay(request: ReplayRequest, sink) {
+    await sink.onHead({ status: request.path === '/missing' ? 404 : 200, headers: { 'content-type': 'text/plain' } });
+    await sink.onChunk(new TextEncoder().encode(`${request.method} ${request.path}`));
+    await sink.onEnd();
+    return ok(undefined);
   },
 };
 
@@ -229,18 +226,22 @@ describe('SignalingClient seam', () => {
 });
 
 describe('ReplayClient seam', () => {
-  it('maps a domain request to a domain response', async () => {
-    const result = await fakeReplayClient.replay({
-      method: 'GET',
-      path: '/api/items',
-      headers: { accept: 'text/plain' },
-      body: new Uint8Array(0),
-    });
+  it('maps a domain request to a streamed domain response', async () => {
+    const head: { status: number } [] = [];
+    const chunks: Uint8Array[] = [];
+    let ended = false;
+    const result = await fakeReplayClient.replay(
+      { method: 'GET', path: '/api/items', headers: { accept: 'text/plain' }, body: new Uint8Array(0) },
+      {
+        onHead: (h) => { head.push(h); },
+        onChunk: (c) => { chunks.push(c); },
+        onEnd: () => { ended = true; },
+      },
+    );
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.status).toBe(200);
-      expect(new TextDecoder().decode(result.value.body)).toBe('GET /api/items');
-    }
+    expect(head[0]?.status).toBe(200);
+    expect(new TextDecoder().decode(chunks[0])).toBe('GET /api/items');
+    expect(ended).toBe(true);
   });
 });
 

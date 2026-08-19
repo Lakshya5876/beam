@@ -1,11 +1,11 @@
-# Governance trust root — every change to these paths requires human review
-# by a code owner on a protected branch (Guide §2.2.3 / §4.4 governance
-# evolution path). Replace the placeholder with the real owning team.
-Architecture Guidelines                                   @beam-governance
-/.claude/settings.json                      @beam-governance
-/.githooks/                                 @beam-governance
-/.github/                                   @beam-governance
-/quarantine.txt                             @beam-governance
-v1_claude_code_development_guide_new.md     @beam-governance
-package.json                                @beam-governance
-package-lock.json                           @beam-governance
+# Governance trust-root — requires Code Owner review before merge.
+# Scaffolded by CovenantWin's install.ps1; replace @your-org/platform-team with a real
+# team/user, then enable "Require review from Code Owners" on this repo's
+# default-branch protection rule (Settings -> Branches). CODEOWNERS alone is
+# advisory — GitHub does not enforce it without that branch protection rule.
+/.githooks/                         @your-org/platform-team
+/.claude/covenant_integrity.sha256      @your-org/platform-team
+/.claude/hooks/                     @your-org/platform-team
+/.claude/settings.json              @your-org/platform-team
+/.github/workflows/covenant.yml         @your-org/platform-team
+/CLAUDE.md                          @your-org/platform-team
