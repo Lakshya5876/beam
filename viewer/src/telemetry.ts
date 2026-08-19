@@ -91,26 +91,36 @@ export function buildTelemetryPayload(
 }
 
 /**
- * Sends at most once per instance — every call after the first is a no-op.
- * `send` is expected to never throw (bootstrap.ts's real implementation
- * wraps the fetch in .catch(() => {})); this class does not itself add a
- * try/catch, so that contract belongs to whoever constructs it.
+ * Sends at most once per instance. claim()/report() are deliberately split
+ * in two: bootstrap.ts's finalizer does async work (getStats()) between
+ * deciding to report and actually sending, and more than one terminal event
+ * (onTerminalFailure, onclose) can each independently decide to finalize.
+ * If the dedup check lived only at send time (as a single reportOnce()
+ * would), two concurrent finalizers could both pass the check during their
+ * respective async gaps and both send — confirmed live: this exact race
+ * produced two beacons for one session before this split existed. claim()
+ * is synchronous, so only the first caller (in call order, before any
+ * `await`) ever gets true.
  */
 export class OutcomeReporter {
   private sent = false;
 
   constructor(private readonly send: (payload: TelemetryPayload) => void) {}
 
-  /** Returns true if this call actually sent a beacon (false if a beacon was
-   *  already sent for this instance, or the outcome has nothing reportable —
-   *  see outcomeForSelectedPath). */
-  reportOnce(outcome: TelemetryOutcome, facts: ConnectionFacts, usage: SessionUsage): boolean {
+  /** Synchronously claims the one-shot report slot. Call this BEFORE any
+   *  async work — a caller that gets false must not proceed to send. */
+  claim(): boolean {
     if (this.sent) {
       return false;
     }
     this.sent = true;
-    this.send(buildTelemetryPayload(outcome, facts, usage));
     return true;
+  }
+
+  /** Sends the beacon. Callers must have already received true from claim();
+   *  this method does not itself guard against duplicate sends. */
+  report(outcome: TelemetryOutcome, facts: ConnectionFacts, usage: SessionUsage): void {
+    this.send(buildTelemetryPayload(outcome, facts, usage));
   }
 
   /** For tests/diagnostics only — never gates production behavior. */

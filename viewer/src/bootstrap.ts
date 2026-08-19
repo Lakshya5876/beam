@@ -167,6 +167,13 @@ async function readTransportUsage(pc: RTCPeerConnection): Promise<{ bytesSent: n
   }
 }
 
+/** How often to snapshot transport usage while connected — see the
+ *  lastKnownUsage doc in bootstrap() for why this snapshot exists at all.
+ *  Deliberately short: live testing showed a short-lived session (connect,
+ *  transfer, host disconnects within ~1-2s) can otherwise end before a
+ *  longer interval ever ticks once, leaving nothing cached to fall back on. */
+const USAGE_POLL_INTERVAL_MS = 1000;
+
 export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 // console.log(`[VIEWER-BOOT] bootstrap() signalingBaseUrl=${signalingBaseUrl}`);
   const root = document.getElementById('beam-root');
@@ -234,22 +241,60 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // stays well-defined for every outcome, including one that never connects.
   const sessionStartedAtMs = Date.now();
 
+  // getStats() read reactively AFTER a failure is confirmed to be too late:
+  // live testing showed candidate-pair entries disappear from the stats
+  // report entirely (not just change state) once connectionState reaches
+  // 'failed' — by the time any failure handler fires, the transport-level
+  // history is already gone. So usage is snapshotted periodically WHILE the
+  // connection is healthy, and finalization prefers whichever of the fresh
+  // read or this last-known-good snapshot is larger per field (a fresh read
+  // may still be legitimately complete for a graceful close; the snapshot is
+  // the fallback for the case just described).
+  let lastKnownUsage = { bytesSent: 0, bytesReceived: 0 };
+  let usagePollHandle: ReturnType<typeof setInterval> | null = null;
+
+  function startUsagePolling(peerConnection: RTCPeerConnection): void {
+    const poll = (): void => {
+      void readTransportUsage(peerConnection).then((usage) => {
+        if (usage.bytesSent > 0 || usage.bytesReceived > 0) {
+          lastKnownUsage = usage;
+        }
+      });
+    };
+    poll(); // immediate first snapshot — don't wait for the first interval tick
+    usagePollHandle = setInterval(poll, USAGE_POLL_INTERVAL_MS);
+  }
+
+  function stopUsagePolling(): void {
+    if (usagePollHandle !== null) {
+      clearInterval(usagePollHandle);
+      usagePollHandle = null;
+    }
+  }
+
   /**
-   * Finalize and report ONE outcome for this session, with duration and
-   * whatever transport usage getStats() shows AT THIS MOMENT — so it must
-   * only be called once the session has genuinely reached a terminal point
-   * (a real failure, or the connection closing after having worked).
-   * OutcomeReporter's own dedup guard makes this safe to call from more than
-   * one of this file's terminal call sites without double-reporting; getStats()
-   * is read fresh each time so whichever call site fires FIRST gets the
-   * live snapshot, not a stale one.
+   * Finalize and report ONE outcome for this session — must only be called
+   * once the session has genuinely reached a terminal point (a real failure,
+   * or the connection closing after having worked). claim() is synchronous
+   * and happens BEFORE the async getStats() read: more than one of this
+   * file's terminal call sites can independently decide to finalize, and if
+   * the dedup check lived only at send time, two concurrent calls could both
+   * pass it during their respective async gaps and both send — this
+   * happened in live testing before claim()/report() were split (see
+   * telemetry.ts's OutcomeReporter doc).
    */
   async function finalizeOutcome(outcome: TelemetryOutcome, peerConnection: RTCPeerConnection): Promise<void> {
+    if (!outcomeReporter.claim()) {
+      return;
+    }
+    stopUsagePolling();
+    const fresh = await readTransportUsage(peerConnection);
     const usage: SessionUsage = {
       durationMs: Date.now() - sessionStartedAtMs,
-      ...(await readTransportUsage(peerConnection)),
+      bytesSent: Math.max(fresh.bytesSent, lastKnownUsage.bytesSent),
+      bytesReceived: Math.max(fresh.bytesReceived, lastKnownUsage.bytesReceived),
     };
-    outcomeReporter.reportOnce(outcome, report.facts(), usage);
+    outcomeReporter.report(outcome, report.facts(), usage);
   }
 
   // M3 PIN gate: show PIN form, wait for DO to confirm or lock.
@@ -326,6 +371,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
       void readSelectedPath(pc).then((path) => {
         report.noteSelectedPath(path);
       });
+      startUsagePolling(pc);
       // Embed the tunneled app in an iframe rather than navigating this
       // document to it — a full navigation here would unload the
       // RTCPeerConnection/SW registration living in this page (see

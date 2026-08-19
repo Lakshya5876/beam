@@ -27,6 +27,22 @@ function usage(overrides: Partial<SessionUsage> = {}): SessionUsage {
   return { durationMs: 0, bytesSent: 0, bytesReceived: 0, ...overrides };
 }
 
+/** Mirrors bootstrap.ts's real call pattern (claim() synchronously, then
+ *  report() only if claimed) — see OutcomeReporter's class doc for why the
+ *  two are split instead of one reportOnce()-style method. */
+function reportIfClaimed(
+  reporter: OutcomeReporter,
+  outcome: TelemetryOutcome,
+  f: ConnectionFacts,
+  u: SessionUsage,
+): boolean {
+  if (!reporter.claim()) {
+    return false;
+  }
+  reporter.report(outcome, f, u);
+  return true;
+}
+
 describe('telemetryUrlFor', () => {
   it('maps ws/wss to http/https on the same origin', () => {
     expect(telemetryUrlFor('ws://localhost:8081')).toBe('http://localhost:8081/telemetry');
@@ -191,7 +207,7 @@ describe('OutcomeReporter — duplicate suppression', () => {
     const sent: TelemetryPayload[] = [];
     const reporter = new OutcomeReporter((p) => sent.push(p));
 
-    const result = reporter.reportOnce('direct', facts({ turnAvailable: true }), usage({ durationMs: 1000 }));
+    const result = reportIfClaimed(reporter, 'direct', facts({ turnAvailable: true }), usage({ durationMs: 1000 }));
 
     expect(result).toBe(true);
     expect(sent).toEqual([
@@ -204,9 +220,9 @@ describe('OutcomeReporter — duplicate suppression', () => {
     const sent: TelemetryPayload[] = [];
     const reporter = new OutcomeReporter((p) => sent.push(p));
 
-    reporter.reportOnce('direct', facts(), usage());
-    const second = reporter.reportOnce('failed', facts({ reachedStage: 'ice-connect' }), usage({ durationMs: 99 }));
-    const third = reporter.reportOnce('relay', facts(), usage({ bytesSent: 1_000_000 }));
+    reportIfClaimed(reporter, 'direct', facts(), usage());
+    const second = reportIfClaimed(reporter, 'failed', facts({ reachedStage: 'ice-connect' }), usage({ durationMs: 99 }));
+    const third = reportIfClaimed(reporter, 'relay', facts(), usage({ bytesSent: 1_000_000 }));
 
     expect(second).toBe(false);
     expect(third).toBe(false);
@@ -218,8 +234,8 @@ describe('OutcomeReporter — duplicate suppression', () => {
     const sent: TelemetryPayload[] = [];
     const reporter = new OutcomeReporter((p) => sent.push(p));
 
-    reporter.reportOnce('relay', facts({ reachedStage: 'relay-ready' }), usage({ durationMs: 5000, bytesSent: 100 }));
-    reporter.reportOnce('relay', facts({ reachedStage: 'relay-ready' }), usage({ durationMs: 5010, bytesSent: 120 }));
+    reportIfClaimed(reporter, 'relay', facts({ reachedStage: 'relay-ready' }), usage({ durationMs: 5000, bytesSent: 100 }));
+    reportIfClaimed(reporter, 'relay', facts({ reachedStage: 'relay-ready' }), usage({ durationMs: 5010, bytesSent: 120 }));
 
     expect(sent).toHaveLength(1);
     expect(sent[0]?.bytesSent).toBe(100); // the FIRST snapshot wins, not the more "final" one
@@ -231,11 +247,38 @@ describe('OutcomeReporter — duplicate suppression', () => {
     const a = new OutcomeReporter((p) => sentA.push(p));
     const b = new OutcomeReporter((p) => sentB.push(p));
 
-    a.reportOnce('direct', facts(), usage());
-    b.reportOnce('relay', facts(), usage());
+    reportIfClaimed(a, 'direct', facts(), usage());
+    reportIfClaimed(b, 'relay', facts(), usage());
 
     expect(sentA).toHaveLength(1);
     expect(sentB).toHaveLength(1);
+  });
+
+  it('claim() is synchronous, so two concurrent async finalizers cannot both pass it — the exact race that produced two beacons for one session before claim()/report() were split', async () => {
+    const sent: TelemetryPayload[] = [];
+    const reporter = new OutcomeReporter((p) => sent.push(p));
+
+    // Mirrors bootstrap.ts's finalizeOutcome: claim() happens BEFORE the
+    // async getStats() read. Two "concurrent" finalizers both start their
+    // async work, but only the one that calls claim() first (synchronously,
+    // in call order) may proceed to report().
+    async function finalize(outcome: TelemetryOutcome, delayMs: number): Promise<void> {
+      if (!reporter.claim()) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      reporter.report(outcome, facts(), usage({ bytesSent: delayMs }));
+    }
+
+    // The second call's claim() happens synchronously right after the
+    // first's, well before either's async delay resolves — simulating
+    // onTerminalFailure and onclose firing moments apart.
+    const first = finalize('relay', 20);
+    const second = finalize('failed', 5);
+    await Promise.all([first, second]);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.outcome).toBe('relay'); // the first claimant, not whichever resolves first
   });
 });
 
@@ -247,7 +290,7 @@ describe('OutcomeReporter — send contract', () => {
     const reporter = new OutcomeReporter(() => {
       throw new Error('a misbehaving send implementation');
     });
-    expect(() => reporter.reportOnce('direct', facts(), usage())).toThrow('a misbehaving send implementation');
+    expect(() => reportIfClaimed(reporter, 'direct', facts(), usage())).toThrow('a misbehaving send implementation');
   });
 });
 
@@ -255,7 +298,8 @@ describe('outcome type coverage', () => {
   it('the three outcomes all shape correctly end to end, including usage', () => {
     for (const outcome of ['direct', 'relay', 'failed'] as const satisfies readonly TelemetryOutcome[]) {
       const sent: TelemetryPayload[] = [];
-      new OutcomeReporter((p) => sent.push(p)).reportOnce(
+      reportIfClaimed(
+        new OutcomeReporter((p) => sent.push(p)),
         outcome,
         facts({ reachedStage: 'sdp-exchange' }),
         usage({ durationMs: 250, bytesSent: 10, bytesReceived: 20 }),
