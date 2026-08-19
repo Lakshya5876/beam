@@ -63,6 +63,7 @@ export class ViewerConnection {
   private pendingCandidates: IceCandidate[] = [];
   private connectionState: ConnectionState = 'connecting';
   private stateHandlers: Array<(state: ConnectionState) => void> = [];
+  private terminalHandlers: Array<() => void> = [];
   private muxHandlers: Array<(mux: StreamMultiplexer) => void> = [];
   private closeHandlers: Array<(openStreamIds: number[]) => void> = [];
   private readonly ipv4Only: boolean;
@@ -198,6 +199,18 @@ export class ViewerConnection {
     } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
       this.connectionState = 'failed';
       for (const handler of this.stateHandlers) handler('failed');
+      // 'disconnected' is transient — ICE can recover it back to 'connected'
+      // without the session ever truly ending, so it must not be treated as
+      // terminal. 'failed' and 'closed' don't self-recover per the WebRTC
+      // spec, and critically, nothing in this class ever calls peer.close()
+      // in response to a remote disconnect — so the data channel's own
+      // 'close' event (transport.onClose, wired to onclose() below) is not
+      // guaranteed to fire on its own after 'failed'. Terminal listeners are
+      // the only reliable signal bootstrap has to finalize a session that
+      // already succeeded and then definitively ended.
+      if (state === 'failed' || state === 'closed') {
+        for (const handler of this.terminalHandlers) handler();
+      }
     }
   }
 
@@ -250,6 +263,18 @@ export class ViewerConnection {
     return () => {
       const idx = this.closeHandlers.indexOf(handler);
       if (idx >= 0) this.closeHandlers.splice(idx, 1);
+    };
+  }
+
+  /** Fires only for a definitively terminal connection state ('failed' or
+   *  'closed') — never for a transient 'disconnected', which can self-recover.
+   *  See the comment in handleConnectionStateChange for why this exists
+   *  separately from onclose(). */
+  onTerminalFailure(handler: () => void): Unsubscribe {
+    this.terminalHandlers.push(handler);
+    return () => {
+      const idx = this.terminalHandlers.indexOf(handler);
+      if (idx >= 0) this.terminalHandlers.splice(idx, 1);
     };
   }
 

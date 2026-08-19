@@ -180,6 +180,55 @@ describe('ViewerConnection (orchestration + candidate buffering)', () => {
     peer.triggerConnectionStateChange('disconnected');
     expect(states).toEqual(['connected', 'failed', 'failed']);
   });
+
+  it('onTerminalFailure fires for a definitively terminal state (failed)', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('failed');
+
+    expect(fired).toBe(1);
+  });
+
+  it('onTerminalFailure fires for a definitively terminal state (closed)', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('closed');
+
+    expect(fired).toBe(1);
+  });
+
+  it('onTerminalFailure does NOT fire for a merely transient disconnected state', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('disconnected');
+
+    expect(fired).toBe(0);
+  });
+
+  it('onTerminalFailure still fires alongside onconnectionstate for the same failed transition', () => {
+    const states: string[] = [];
+    let terminalFired = 0;
+    conn.onconnectionstate((state) => states.push(state));
+    conn.onTerminalFailure(() => { terminalFired++; });
+
+    peer.triggerConnectionStateChange('failed');
+
+    expect(states).toEqual(['failed']);
+    expect(terminalFired).toBe(1);
+  });
+
+  it('onTerminalFailure unsubscribe stops future notifications', () => {
+    let fired = 0;
+    const unsubscribe = conn.onTerminalFailure(() => { fired++; });
+    unsubscribe();
+
+    peer.triggerConnectionStateChange('failed');
+
+    expect(fired).toBe(0);
+  });
 });
 
 describe('ViewerConnection — ipv4Only candidate filtering', () => {

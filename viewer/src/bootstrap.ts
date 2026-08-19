@@ -341,23 +341,46 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     } else if (state === 'failed') {
       clearTimeout(connectTimer);
       // ViewerConnection.handleConnectionStateChange maps 'failed',
-      // 'disconnected', AND 'closed' to this one signal — but 'disconnected'
-      // is not necessarily terminal; ICE can recover from it back to
-      // 'connected' without the session ever truly ending. Finalizing a
-      // prior success FROM HERE was tried and proven wrong by live testing:
-      // a transient blip consumed the one-shot report with a near-zero,
-      // premature snapshot, permanently losing the session's real final
-      // usage when the connection then continued for much longer. Only
-      // report 'failed' here, and only for a connection that never
-      // succeeded at all — conn.onclose (the data channel's OWN close event,
-      // a materially more definitive "this is really over" signal than the
-      // aggregate peer-connection state) is the sole trigger for finalizing
-      // a session that had already succeeded; see its handler below.
+      // 'disconnected', AND 'closed' to this one signal for UI purposes —
+      // but 'disconnected' is not necessarily terminal; ICE can recover from
+      // it back to 'connected' without the session ever truly ending. A
+      // transient blip finalizing HERE was tried and proven wrong by live
+      // testing: it consumed the one-shot report with a near-zero, premature
+      // snapshot, permanently losing the session's real final usage when the
+      // connection then continued for much longer. So this branch only
+      // reports 'failed' for a connection that never succeeded at all — a
+      // session that DID succeed and then genuinely ends is finalized via
+      // conn.onTerminalFailure/conn.onclose below, which only fire for the
+      // definitively-terminal sub-states, not a merely transient blip.
       if (!report.transportEstablished()) {
         void finalizeOutcome('failed', pc);
       }
       root.textContent = describeFailure(report.facts());
     }
+  });
+
+  // Finalizes a session that already succeeded, once it definitively ends.
+  // outcomeForSelectedPath returns null (no-op) if the session never reached
+  // a selected path, so this is safe to call unconditionally.
+  function finalizeIfEstablished(): void {
+    const priorOutcome = outcomeForSelectedPath(report.facts().selectedPath);
+    if (priorOutcome) {
+      void finalizeOutcome(priorOutcome, pc);
+    }
+  }
+
+  // Nothing in ViewerConnection calls peer.close() in response to a remote
+  // disconnect, so the data channel's own 'close' event (conn.onclose below)
+  // is not guaranteed to fire just because the aggregate connection state
+  // went terminal — confirmed by live testing: a real host-side Ctrl-C
+  // reached 'failed' within seconds, but the data channel never closed and
+  // no beacon was sent. onTerminalFailure is ViewerConnection's dedicated
+  // signal for the definitively-terminal sub-states ('failed'/'closed'),
+  // and is the primary way an established session gets finalized in
+  // practice. OutcomeReporter's dedup guard makes it safe for this and
+  // conn.onclose to both attempt a report for the same session.
+  conn.onTerminalFailure(() => {
+    finalizeIfEstablished();
   });
 
   // B1: wire mux-ready AFTER data channel is open (not on SW claim)
@@ -373,14 +396,10 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
   // N3: on transport close, emit relay-error for all open streams
   conn.onclose((openStreamIds) => {
     // The data channel's own close can fire independently of (and possibly
-    // before) onconnectionstate('failed') above — this is the more common,
-    // "graceful" way a healthy session ends (host disconnects, tab closes).
-    // OutcomeReporter's dedup guard makes it safe for both this and the
-    // 'failed' branch above to attempt a report for the same session.
-    const priorOutcome = outcomeForSelectedPath(report.facts().selectedPath);
-    if (priorOutcome) {
-      void finalizeOutcome(priorOutcome, pc);
-    }
+    // before, or in some cases instead of) onTerminalFailure above — see its
+    // wiring comment for why both exist. OutcomeReporter's dedup guard makes
+    // it safe for both to attempt a report for the same session.
+    finalizeIfEstablished();
     const sw = navigator.serviceWorker.controller;
     if (!sw) return;
     for (const streamId of openStreamIds) {
