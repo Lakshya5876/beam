@@ -317,7 +317,8 @@ Layer violations are detected by ESLint rules enforced at commit time.
 
 Build: `tsc --project tsconfig.build.json` → `dist/`  
 Install: `npm install -g beam-tunnel`  
-Run: `beam 3000` or `npx beam-tunnel 3000`
+Run: `bm 3000` (`npx beam-tunnel` currently fails on Windows — npx
+process-spawn bug, not a packaging defect, see LIMITATIONS.md)
 
 ### 8.2 Viewer (Cloudflare Pages)
 

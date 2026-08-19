@@ -162,14 +162,18 @@ Preference order based on: memorability, grep-ability, zero collision, scoped sa
 | `beamrelay` | Unscoped | Technically precise, maps to the architecture (`beam relay`), memorable. |
 | `locbeam` | Unscoped | "localhost + beam", short, clean. Less self-explanatory. |
 
-**Decision (superseding the original recommendation above):** Use `beam-tunnel` — unscoped, not `@beamtunnel/cli`. The scoped option was reconsidered and dropped in favor of removing all setup friction: an unscoped package needs no npm organization to create first, publishes public by default (no `--access public` flag), and installs/runs identically either way (`npm install -g beam-tunnel` or `npx beam-tunnel`). The tradeoff is real and worth stating plainly: an unscoped name does not have the scoped guarantee that no other org can ever publish something similar — the mitigation is the name's specificity (see THREAT_MODEL.md T11) and verifying it resolves correctly before each release, not namespace ownership.
+**Decision (superseding the original recommendation above):** Use `beam-tunnel` — unscoped, not `@beamtunnel/cli`. The scoped option was reconsidered and dropped in favor of removing all setup friction: an unscoped package needs no npm organization to create first and publishes public by default (no `--access public` flag). The tradeoff is real and worth stating plainly: an unscoped name does not have the scoped guarantee that no other org can ever publish something similar — the mitigation is the name's specificity (see THREAT_MODEL.md T11) and verifying it resolves correctly before each release, not namespace ownership.
+
+**Update after real-world testing:** `npm install -g beam-tunnel` + `bm` is confirmed reliable; `npx beam-tunnel` currently fails on Windows (a real npx process-spawn bug, root-caused, not a Beam packaging defect — see LIMITATIONS.md). The two install paths are not currently equivalent — global install is the documented primary flow.
 
 **Action required before publish:** None — `beam-tunnel` requires no org registration, just an npm account to publish under.
 
 ### Verification checklist before `npm publish`
 
 - [ ] `npm search beam` — confirm no exact-match conflict for chosen name
-- [ ] `npx beam-tunnel --version` returns your version, not an error
+- [ ] `npm install -g beam-tunnel@latest` then `bm --version` returns your
+      version, not an error (`npx beam-tunnel` fails on Windows — see
+      LIMITATIONS.md — don't use it for this check)
 - [ ] `npm info beam-tunnel` returns 404 before publish, then your metadata after
 - [ ] GitHub org/repo naming kept consistent with `beam-tunnel` for brand identity
 - [ ] Domain `beam-tunnel.dev` (or similar) checked for availability if planning a landing page

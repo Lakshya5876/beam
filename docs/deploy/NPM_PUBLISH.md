@@ -46,8 +46,12 @@ npm publish       # beam-tunnel is unscoped — public by default, no --access f
 ```
 
 - [ ] Verify on npmjs.com: README renders, version correct
-- [ ] `npx beam-tunnel@latest 3000` on a clean machine reaches the PIN
-      screen (this exercises the compiled DEFAULT_* URLs — the real deploy)
+- [ ] On a clean Windows machine: `npm install -g beam-tunnel@latest` then
+      `bm 3000` reaches the PIN screen (this exercises the compiled
+      DEFAULT_* URLs — the real deploy). Do NOT use `npx beam-tunnel` for
+      this check — it fails on Windows for reasons unrelated to the
+      package itself (see LIMITATIONS.md); a failure there is not evidence
+      the release is broken.
 
 ## Rollback
 

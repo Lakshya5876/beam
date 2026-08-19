@@ -25,11 +25,11 @@ The zero-trust model means **the viewer URL alone grants nothing**. A second sec
 npm install -g beam-tunnel
 ```
 
-or for one-off use:
-
-```bash
-npx beam-tunnel 3000
-```
+`npx beam-tunnel` (one-off use, no permanent install) is documented as a
+goal but currently fails on Windows — confirmed root cause is an npx
+process-spawn bug on that platform, not a Beam packaging defect. See
+LIMITATIONS.md. Use the global install above until that's resolved
+upstream.
 
 ### Step 2: Start a local dev server
 

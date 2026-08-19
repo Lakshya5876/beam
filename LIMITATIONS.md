@@ -264,3 +264,32 @@ message.
 combination before publishing (RELEASE_CHECKLIST.md Phase 0/4). If it fails,
 either install `cmake` + a C compiler on that machine, or use a Node version
 with an available prebuild.
+
+## `npx beam-tunnel` fails on Windows — use `npm install -g` instead
+
+Confirmed via real testing (npm 10.9.2, Node 22.14.0, Windows, both
+PowerShell and reproduced directly): `npx beam-tunnel` fails immediately
+with `'bm' is not recognized as an internal or external command`, before
+the local-URL prompt ever appears.
+
+This is not a Beam packaging defect. Root-caused, not guessed:
+- The package's `bin` shims (`bm`, `bm.cmd`, `bm.ps1`) are generated
+  correctly by npm's installer — inspected directly in npx's own temp
+  install directory (`node_modules/.bin/`) and confirmed present.
+- Invoking the generated `bm.ps1` shim directly (bypassing npx entirely)
+  works perfectly.
+- `npm install -g beam-tunnel` followed by `bm` works perfectly — this
+  goes through npm's normal, permanent bin-linking path rather than npx's
+  temporary-install-and-spawn path.
+- Even `npx -p beam-tunnel bm` — explicitly naming both the package and
+  the exact bin, removing any ambiguity from name-matching — fails
+  identically. This rules out "bin name differs from package name" as the
+  cause; the failure is in npx's own process-spawn step on Windows, after
+  resolution has already succeeded, not in resolving which bin to run.
+
+**Mitigation**: the documented primary install path (see README) is
+`npm install -g beam-tunnel` then `bm` — two commands instead of one, but
+confirmed reliable, and arguably better anyway for a tool used more than
+once (npx re-downloads every invocation). Re-test `npx beam-tunnel`
+against future npm releases; this may be fixed upstream without any
+change needed on Beam's side.
