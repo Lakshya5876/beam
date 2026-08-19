@@ -47,6 +47,30 @@ jobs:
           [ -f package.json ] && [ ! -f package-lock.json ] && npm install
           true
 
+      - name: Seed CI-local covenant state (commands config — the real state file is gitignored/machine-local)
+        run: |
+          mkdir -p .claude
+          cat > .claude/covenant_state.json <<'JSON'
+          {
+            "framework_version": "1.0.0-win",
+            "last_pass_sha": {},
+            "last_pass_timestamp": null,
+            "thresholds": { "coverage_pct": 80, "complexity_max": 10, "command_timeout_sec": 30 },
+            "core_files": [],
+            "receipts": {},
+            "token": { "token_budget": null, "token_spent_today": 0, "token_last_reset": null, "token_audit_log": [] },
+            "commands": {
+              "lint": "npm run lint",
+              "type": "npm run typecheck && npm --prefix signaling run typecheck && npm --prefix viewer run typecheck",
+              "test": "npm test && npm --prefix signaling test && npm --prefix viewer test",
+              "coverage": null,
+              "complexity": null,
+              "frontend_lint": null,
+              "frontend_type": null
+            }
+          }
+          JSON
+
       - name: Run governance covenant (mechanical - tests forced on in CI)
         env:
           COVENANT_TRIGGER: ci
