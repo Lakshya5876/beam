@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isIpv6Candidate, ViewerConnection, type BrowserPeer, type SignalingSocket, type IceCandidate } from '../src/viewer-connection.js';
 import { serializeMessage } from '../src/signaling-messages.js';
 
@@ -199,7 +199,7 @@ describe('ViewerConnection (orchestration + candidate buffering)', () => {
     expect(fired).toBe(1);
   });
 
-  it('onTerminalFailure does NOT fire for a merely transient disconnected state', () => {
+  it('onTerminalFailure does NOT fire immediately for disconnected (it gets a grace period — see the dedicated describe block below)', () => {
     let fired = 0;
     conn.onTerminalFailure(() => { fired++; });
 
@@ -228,6 +228,76 @@ describe('ViewerConnection (orchestration + candidate buffering)', () => {
     peer.triggerConnectionStateChange('failed');
 
     expect(fired).toBe(0);
+  });
+});
+
+describe('ViewerConnection — disconnected grace period', () => {
+  // A real interactive Ctrl-C against production showed connectionState can
+  // settle at 'disconnected' indefinitely, never transitioning to 'failed'
+  // on its own — so onTerminalFailure cannot rely on that transition ever
+  // happening. This grace period is the fix: 'disconnected' becomes terminal
+  // on its own after a bounded wait, unless it recovers first.
+  let peer: FakeBrowserPeer;
+  let socket: FakeSignalingSocket;
+  let conn: ViewerConnection;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    peer = new FakeBrowserPeer();
+    socket = new FakeSignalingSocket();
+    conn = new ViewerConnection(peer, socket);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fires onTerminalFailure after the grace period if disconnected never recovers', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('disconnected');
+    expect(fired).toBe(0); // not yet — still within the grace window
+
+    vi.advanceTimersByTime(10_000);
+
+    expect(fired).toBe(1);
+  });
+
+  it('does NOT fire onTerminalFailure if the connection recovers before the grace period elapses', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('disconnected');
+    vi.advanceTimersByTime(5_000); // partway through the grace window
+    peer.triggerConnectionStateChange('connected'); // real recovery
+    vi.advanceTimersByTime(10_000); // past where the original timer would have fired
+
+    expect(fired).toBe(0);
+  });
+
+  it('does not double-fire if failed arrives during the disconnected grace window', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('disconnected');
+    vi.advanceTimersByTime(3_000);
+    peer.triggerConnectionStateChange('failed'); // definitively terminal, arrives early
+    vi.advanceTimersByTime(10_000); // past where the original grace timer would also have fired
+
+    expect(fired).toBe(1);
+  });
+
+  it('a second disconnected event while already waiting does not reset or duplicate the timer', () => {
+    let fired = 0;
+    conn.onTerminalFailure(() => { fired++; });
+
+    peer.triggerConnectionStateChange('disconnected');
+    vi.advanceTimersByTime(8_000);
+    peer.triggerConnectionStateChange('disconnected'); // redundant, e.g. a flapping ICE re-check
+    vi.advanceTimersByTime(2_000); // total 10s from the FIRST disconnected event
+
+    expect(fired).toBe(1);
   });
 });
 
