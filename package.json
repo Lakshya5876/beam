@@ -1,13 +1,14 @@
 {
   "name": "beam-tunnel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Expose your localhost server to a browser peer over WebRTC. No cloud relay, near-zero cost.",
+  "author": "Lakshya5876 (https://github.com/Lakshya5876)",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
   "bin": {
-    "bm": "./dist/presentation/cli.js"
+    "bm": "dist/presentation/cli.js"
   },
   "exports": {
     ".": "./dist/composition.js"
@@ -40,7 +41,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Lakshya5876/beam.git"
+    "url": "git+https://github.com/Lakshya5876/beam.git"
   },
   "homepage": "https://github.com/Lakshya5876/beam#readme",
   "dependencies": {
