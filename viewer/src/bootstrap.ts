@@ -24,7 +24,15 @@ import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { decodeFrame, encodeFrame, isFrameDecodeError } from './protocol-bridge.js';
 import type { StreamMultiplexer } from './protocol-bridge.js';
 import { createWsBridge } from './ws-bridge.js';
-import { OutcomeReporter, outcomeForSelectedPath, telemetryUrlFor } from './telemetry.js';
+import {
+  OutcomeReporter,
+  extractTransportUsage,
+  outcomeForSelectedPath,
+  telemetryUrlFor,
+  type CandidatePairStatsLike,
+  type SessionUsage,
+  type TelemetryOutcome,
+} from './telemetry.js';
 import {
   classifySelectedPath,
   ConnectionReport,
@@ -140,6 +148,25 @@ export async function readSelectedPath(pc: RTCPeerConnection): Promise<SelectedP
   return 'unknown';
 }
 
+/**
+ * Read transport-layer usage (bytesSent/bytesReceived on the succeeded
+ * candidate pair) for the telemetry beacon's usage fields — see telemetry.ts
+ * for exactly what these numbers do and do not measure. The actual
+ * extraction is pure (extractTransportUsage, unit-tested); this wrapper is
+ * only the getStats() I/O call, same shape as readSelectedPath above.
+ */
+async function readTransportUsage(pc: RTCPeerConnection): Promise<{ bytesSent: number; bytesReceived: number }> {
+  try {
+    const stats = await pc.getStats();
+    const entries: CandidatePairStatsLike[] = [];
+    stats.forEach((entry) => { entries.push(entry as never); });
+    return extractTransportUsage(entries);
+  } catch {
+    // Telemetry must never break a working connection.
+    return { bytesSent: 0, bytesReceived: 0 };
+  }
+}
+
 export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 // console.log(`[VIEWER-BOOT] bootstrap() signalingBaseUrl=${signalingBaseUrl}`);
   const root = document.getElementById('beam-root');
@@ -203,6 +230,28 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     }).catch(() => { /* best-effort — see class doc */ });
   });
 
+  // Wall-clock start of this attempt — the only definition of "duration" that
+  // stays well-defined for every outcome, including one that never connects.
+  const sessionStartedAtMs = Date.now();
+
+  /**
+   * Finalize and report ONE outcome for this session, with duration and
+   * whatever transport usage getStats() shows AT THIS MOMENT — so it must
+   * only be called once the session has genuinely reached a terminal point
+   * (a real failure, or the connection closing after having worked).
+   * OutcomeReporter's own dedup guard makes this safe to call from more than
+   * one of this file's terminal call sites without double-reporting; getStats()
+   * is read fresh each time so whichever call site fires FIRST gets the
+   * live snapshot, not a stale one.
+   */
+  async function finalizeOutcome(outcome: TelemetryOutcome, peerConnection: RTCPeerConnection): Promise<void> {
+    const usage: SessionUsage = {
+      durationMs: Date.now() - sessionStartedAtMs,
+      ...(await readTransportUsage(peerConnection)),
+    };
+    outcomeReporter.reportOnce(outcome, report.facts(), usage);
+  }
+
   // M3 PIN gate: show PIN form, wait for DO to confirm or lock.
   // Returns buffered post-pin-ok messages to prevent the offer-drop race.
   const buffered = await requestPinVerification(ws, root);
@@ -260,7 +309,7 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     if (report.transportEstablished()) {
       return;
     }
-    outcomeReporter.reportOnce('failed', report.facts());
+    void finalizeOutcome('failed', pc);
     root.textContent = describeFailure(report.facts());
     conn.close();
   }, CONNECT_TIMEOUT_MS);
@@ -270,13 +319,12 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
       clearTimeout(connectTimer);
       report.reach('datachannel-open');
       // Report the path ICE actually chose — the evidence for whether this
-      // session went direct or fell back to TURN.
+      // session went direct or fell back to TURN. The OUTCOME beacon itself
+      // is deliberately NOT sent here: duration/bytes would be ~0 this early
+      // (see telemetry.ts's file doc) — it fires once the session actually
+      // ends, from conn.onclose or the 'failed' branch below.
       void readSelectedPath(pc).then((path) => {
         report.noteSelectedPath(path);
-        const outcome = outcomeForSelectedPath(path);
-        if (outcome) {
-          outcomeReporter.reportOnce(outcome, report.facts());
-        }
       });
       // Embed the tunneled app in an iframe rather than navigating this
       // document to it — a full navigation here would unload the
@@ -292,7 +340,22 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
       }
     } else if (state === 'failed') {
       clearTimeout(connectTimer);
-      outcomeReporter.reportOnce('failed', report.facts());
+      // ViewerConnection.handleConnectionStateChange maps 'failed',
+      // 'disconnected', AND 'closed' to this one signal — but 'disconnected'
+      // is not necessarily terminal; ICE can recover from it back to
+      // 'connected' without the session ever truly ending. Finalizing a
+      // prior success FROM HERE was tried and proven wrong by live testing:
+      // a transient blip consumed the one-shot report with a near-zero,
+      // premature snapshot, permanently losing the session's real final
+      // usage when the connection then continued for much longer. Only
+      // report 'failed' here, and only for a connection that never
+      // succeeded at all — conn.onclose (the data channel's OWN close event,
+      // a materially more definitive "this is really over" signal than the
+      // aggregate peer-connection state) is the sole trigger for finalizing
+      // a session that had already succeeded; see its handler below.
+      if (!report.transportEstablished()) {
+        void finalizeOutcome('failed', pc);
+      }
       root.textContent = describeFailure(report.facts());
     }
   });
@@ -309,6 +372,15 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
 
   // N3: on transport close, emit relay-error for all open streams
   conn.onclose((openStreamIds) => {
+    // The data channel's own close can fire independently of (and possibly
+    // before) onconnectionstate('failed') above — this is the more common,
+    // "graceful" way a healthy session ends (host disconnects, tab closes).
+    // OutcomeReporter's dedup guard makes it safe for both this and the
+    // 'failed' branch above to attempt a report for the same session.
+    const priorOutcome = outcomeForSelectedPath(report.facts().selectedPath);
+    if (priorOutcome) {
+      void finalizeOutcome(priorOutcome, pc);
+    }
     const sw = navigator.serviceWorker.controller;
     if (!sw) return;
     for (const streamId of openStreamIds) {

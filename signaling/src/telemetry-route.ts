@@ -4,11 +4,13 @@
  * (viewer/_worker-src/entry.ts) — same pattern as ice-config-route.ts, so the
  * two entries cannot drift.
  *
- * Records ONLY what telemetry.ts's schema defines: outcome, failure stage,
- * and whether TURN was available. This handler never reads any other field
- * from the request body (parseTelemetryPayload only recognizes those three),
- * never reads request headers beyond what's needed to parse JSON, and never
- * logs the body.
+ * Records ONLY what telemetry.ts's schema defines and documents in full
+ * (outcome, failure stage, TURN availability, session duration, and
+ * transport-layer bytes sent/received — see that file for exactly what the
+ * byte fields do and do not measure). This handler never reads any other
+ * field from the request body (parseTelemetryPayload only recognizes the
+ * known ones, everything else is silently ignored), never reads request
+ * headers beyond what's needed to parse JSON, and never logs the body.
  *
  * Best-effort by design, matching the viewer's own fire-and-forget beacon:
  * a malformed body is rejected (400) without writing anything; a write

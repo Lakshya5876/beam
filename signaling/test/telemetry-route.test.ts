@@ -28,35 +28,47 @@ function throwingAnalytics(): TelemetryEnv {
 }
 
 describe('handleTelemetry — direct outcome', () => {
-  it('writes a data point and responds 204', async () => {
-    const { env, writes } = capturingAnalytics();
-    const response = await handleTelemetry(post({ outcome: 'direct', turnAvailable: true }), env);
-
-    expect(response.status).toBe(204);
-    expect(writes).toEqual([{ blobs: ['direct', 'none'], doubles: [1, 1] }]);
-  });
-});
-
-describe('handleTelemetry — relay outcome', () => {
-  it('writes a data point and responds 204', async () => {
-    const { env, writes } = capturingAnalytics();
-    const response = await handleTelemetry(post({ outcome: 'relay', turnAvailable: true }), env);
-
-    expect(response.status).toBe(204);
-    expect(writes).toEqual([{ blobs: ['relay', 'none'], doubles: [1, 1] }]);
-  });
-});
-
-describe('handleTelemetry — failed outcome', () => {
-  it('writes the failure stage and turnAvailable=0', async () => {
+  it('writes a data point including duration and bytes, and responds 204', async () => {
     const { env, writes } = capturingAnalytics();
     const response = await handleTelemetry(
-      post({ outcome: 'failed', failureStage: 'ice-gathering', turnAvailable: false }),
+      post({ outcome: 'direct', turnAvailable: true, durationMs: 45_000, bytesSent: 12_000, bytesReceived: 340_000 }),
       env,
     );
 
     expect(response.status).toBe(204);
-    expect(writes).toEqual([{ blobs: ['failed', 'ice-gathering'], doubles: [0, 1] }]);
+    expect(writes).toEqual([{ blobs: ['direct', 'none'], doubles: [1, 1, 45_000, 12_000, 340_000] }]);
+  });
+});
+
+describe('handleTelemetry — relay outcome', () => {
+  it('writes a data point including duration and bytes, and responds 204', async () => {
+    const { env, writes } = capturingAnalytics();
+    const response = await handleTelemetry(
+      post({
+        outcome: 'relay',
+        turnAvailable: true,
+        durationMs: 90_000,
+        bytesSent: 5_000_000,
+        bytesReceived: 8_000_000,
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(204);
+    expect(writes).toEqual([{ blobs: ['relay', 'none'], doubles: [1, 1, 90_000, 5_000_000, 8_000_000] }]);
+  });
+});
+
+describe('handleTelemetry — failed outcome', () => {
+  it('writes the failure stage, turnAvailable=0, and whatever usage accumulated before failing', async () => {
+    const { env, writes } = capturingAnalytics();
+    const response = await handleTelemetry(
+      post({ outcome: 'failed', failureStage: 'ice-gathering', turnAvailable: false, durationMs: 12_000 }),
+      env,
+    );
+
+    expect(response.status).toBe(204);
+    expect(writes).toEqual([{ blobs: ['failed', 'ice-gathering'], doubles: [0, 1, 12_000, 0, 0] }]);
   });
 
   it('degrades an unrecognized failure stage to "none" rather than rejecting the request', async () => {
@@ -64,7 +76,50 @@ describe('handleTelemetry — failed outcome', () => {
     const response = await handleTelemetry(post({ outcome: 'failed', failureStage: 'made-up-stage' }), env);
 
     expect(response.status).toBe(204);
-    expect(writes).toEqual([{ blobs: ['failed', 'none'], doubles: [0, 1] }]);
+    expect(writes).toEqual([{ blobs: ['failed', 'none'], doubles: [0, 1, 0, 0, 0] }]);
+  });
+});
+
+describe('handleTelemetry — duration and byte-count collection', () => {
+  it('defaults duration/bytes to 0 when the client omits them', async () => {
+    const { env, writes } = capturingAnalytics();
+    await handleTelemetry(post({ outcome: 'direct' }), env);
+
+    expect(writes).toEqual([{ blobs: ['direct', 'none'], doubles: [0, 1, 0, 0, 0] }]);
+  });
+
+  it('accepts zero as a legitimate value (a session that opened but transferred nothing yet)', async () => {
+    const { env, writes } = capturingAnalytics();
+    await handleTelemetry(post({ outcome: 'direct', durationMs: 0, bytesSent: 0, bytesReceived: 0 }), env);
+
+    expect(writes).toEqual([{ blobs: ['direct', 'none'], doubles: [0, 1, 0, 0, 0] }]);
+  });
+
+  it('degrades a non-numeric duration/bytes to 0 rather than rejecting the request (malformed/unexpected client stats)', async () => {
+    const { env, writes } = capturingAnalytics();
+    const response = await handleTelemetry(
+      post({ outcome: 'relay', durationMs: 'a while', bytesSent: null, bytesReceived: ['not', 'a', 'number'] }),
+      env,
+    );
+
+    expect(response.status).toBe(204);
+    expect(writes).toEqual([{ blobs: ['relay', 'none'], doubles: [0, 1, 0, 0, 0] }]);
+  });
+
+  it('degrades a negative duration/bytes to 0', async () => {
+    const { env, writes } = capturingAnalytics();
+    await handleTelemetry(post({ outcome: 'direct', durationMs: -1, bytesSent: -500 }), env);
+
+    expect(writes).toEqual([{ blobs: ['direct', 'none'], doubles: [0, 1, 0, 0, 0] }]);
+  });
+
+  it('clamps an absurdly large byte count rather than admitting it unbounded (a public endpoint sanity ceiling)', async () => {
+    const { env, writes } = capturingAnalytics();
+    await handleTelemetry(post({ outcome: 'relay', bytesSent: Number.MAX_SAFE_INTEGER }), env);
+
+    const point = writes[0];
+    expect(point?.doubles?.[3]).toBe(1024 ** 4); // MAX_BYTES (1 TiB) — see telemetry.ts
+    expect(point?.doubles?.[3]).toBeLessThan(Number.MAX_SAFE_INTEGER);
   });
 });
 
@@ -127,6 +182,14 @@ describe('handleTelemetry — malformed input', () => {
 describe('handleTelemetry — write failure never reaches the client', () => {
   it('still responds 204 when writeDataPoint throws', async () => {
     const response = await handleTelemetry(post({ outcome: 'direct' }), throwingAnalytics());
+    expect(response.status).toBe(204);
+  });
+
+  it('still responds 204 when writeDataPoint throws even with a full usage payload', async () => {
+    const response = await handleTelemetry(
+      post({ outcome: 'relay', durationMs: 90_000, bytesSent: 5_000_000, bytesReceived: 8_000_000 }),
+      throwingAnalytics(),
+    );
     expect(response.status).toBe(204);
   });
 

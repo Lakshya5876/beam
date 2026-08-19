@@ -21,6 +21,30 @@
  *   double2: count         — always 1; standard Analytics Engine convention
  *                            so SUM(double2) is a reliable request count
  *                            even under high-volume sampling.
+ *   double3: durationMs    — wall-clock time from the viewer starting its
+ *                            connection attempt to this session's terminal
+ *                            point (success-then-close, or failure).
+ *   double4: bytesSent     — see BYTE SEMANTICS below. 0 for a session that
+ *                            never carried any traffic.
+ *   double5: bytesReceived — see BYTE SEMANTICS below.
+ *
+ * BYTE SEMANTICS — read before querying double4/double5. The viewer sources
+ * these from RTCIceCandidatePairStats (the WebRTC standard stats object for
+ * the ICE pair that actually carried the session), NOT from counting HTTP
+ * payload bytes at the Beam protocol layer. This is TRANSPORT-layer: it
+ * includes DTLS record framing, SCTP framing, and ICE consent/keepalive
+ * traffic, measured by the VIEWER at its own end of the connection. For a
+ * 'relay' session this is what the viewer's browser sent/received to/from
+ * the TURN server — one leg of the relay, from one peer's viewpoint. It does
+ * NOT equal what a TURN provider bills: providers commonly meter BOTH relay
+ * legs (client<->server and server<->peer), and the TURN protocol's own
+ * framing (ChannelData headers, permission/allocation overhead) adds bytes
+ * at the relay server that never appear in either endpoint's own
+ * candidate-pair stats. Treat double4+double5 on relay sessions as a
+ * same-order-of-magnitude, DIRECTIONAL estimate of provider-billed usage,
+ * not a predicted bill — calibrate against the provider's own dashboard
+ * once real data accumulates. See viewer/src/telemetry.ts's file doc for
+ * the full reasoning, and LIMITATIONS.md for the accounting relationship.
  *
  * Deliberately absent, by construction — never parsed, never in the wire
  * shape at all: session codes, PINs, TURN credentials, request paths/URLs,
@@ -51,7 +75,16 @@ export interface TelemetryPayload {
   readonly outcome: TelemetryOutcome;
   readonly failureStage: FailureStage;
   readonly turnAvailable: boolean;
+  readonly durationMs: number;
+  readonly bytesSent: number;
+  readonly bytesReceived: number;
 }
+
+/** Sanity ceilings for a PUBLIC, unauthenticated endpoint — bound how much a
+ *  single malformed or hostile data point can skew SUM()/AVG() aggregates.
+ *  Generous relative to any real Beam session, not a real usage limit. */
+const MAX_DURATION_MS = 24 * 60 * 60 * 1000; // 24h
+const MAX_BYTES = 1024 ** 4; // 1 TiB
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -65,12 +98,21 @@ function isFailureStage(value: unknown): value is FailureStage {
   return typeof value === 'string' && (FAILURE_STAGES as readonly string[]).includes(value);
 }
 
+/** Clamps to [0, max]; anything else (missing, non-numeric, negative,
+ *  NaN/Infinity, absurdly large) degrades to 0 rather than rejecting the
+ *  payload — only `outcome` is load-bearing (see parseTelemetryPayload). */
+function boundedNonNegative(value: unknown, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+  return Math.min(value, max);
+}
+
 /**
  * Total: any input that isn't a well-formed telemetry payload yields null,
- * never a throw — this is untrusted, public-endpoint input. `failureStage`
- * and `turnAvailable` are optional on the wire and default to 'none'/false
- * when absent or malformed, rather than rejecting the whole payload — only
- * `outcome` is load-bearing.
+ * never a throw — this is untrusted, public-endpoint input. Every field
+ * except `outcome` is optional on the wire and degrades to a safe default
+ * when absent or malformed, rather than rejecting the whole payload.
  */
 export function parseTelemetryPayload(raw: unknown): TelemetryPayload | null {
   if (!isRecord(raw)) {
@@ -83,7 +125,10 @@ export function parseTelemetryPayload(raw: unknown): TelemetryPayload | null {
   const rawStage = raw['failureStage'];
   const failureStage = isFailureStage(rawStage) ? rawStage : 'none';
   const turnAvailable = raw['turnAvailable'] === true;
-  return { outcome, failureStage, turnAvailable };
+  const durationMs = boundedNonNegative(raw['durationMs'], MAX_DURATION_MS);
+  const bytesSent = boundedNonNegative(raw['bytesSent'], MAX_BYTES);
+  const bytesReceived = boundedNonNegative(raw['bytesReceived'], MAX_BYTES);
+  return { outcome, failureStage, turnAvailable, durationMs, bytesSent, bytesReceived };
 }
 
 export interface TelemetryDataPoint {
@@ -95,6 +140,6 @@ export interface TelemetryDataPoint {
 export function toDataPoint(payload: TelemetryPayload): TelemetryDataPoint {
   return {
     blobs: [payload.outcome, payload.failureStage],
-    doubles: [payload.turnAvailable ? 1 : 0, 1],
+    doubles: [payload.turnAvailable ? 1 : 0, 1, payload.durationMs, payload.bytesSent, payload.bytesReceived],
   };
 }
