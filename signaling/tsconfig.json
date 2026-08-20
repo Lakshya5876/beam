@@ -16,6 +16,6 @@
     "noEmit": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "//": "Node-typed pass: pure modules + tests. The Worker entry and DO use Workers globals and are checked by tsconfig.worker.json instead.",
-  "exclude": ["src/worker.ts", "src/session-do.ts"]
+  "//": "Node-typed pass: pure modules + tests. The Worker entry and DO use Workers globals and are checked by tsconfig.worker.json instead; test/session-do.test.ts imports the DO directly against hand-rolled fakes of those same globals, so it is typed alongside session-do.ts by tsconfig.do-test.json instead of here.",
+  "exclude": ["src/worker.ts", "src/session-do.ts", "test/session-do.test.ts"]
 }

@@ -41,6 +41,29 @@ describe('sw-bridge', () => {
       expect(parseSwMessage({ sessionCode: 'abc' })).toBeNull();
     });
 
+    it('parses iframe-owner with sessionCode', () => {
+      expect(parseSwMessage({ type: 'iframe-owner', sessionCode: 'abc123' })).toEqual({
+        type: 'iframe-owner',
+        sessionCode: 'abc123',
+      });
+    });
+
+    it('returns null for iframe-owner missing sessionCode', () => {
+      expect(parseSwMessage({ type: 'iframe-owner' })).toBeNull();
+      expect(parseSwMessage({ type: 'iframe-owner', sessionCode: 42 })).toBeNull();
+    });
+
+    it('parses mux-gone with sessionCode', () => {
+      expect(parseSwMessage({ type: 'mux-gone', sessionCode: 'xyz789' })).toEqual({
+        type: 'mux-gone',
+        sessionCode: 'xyz789',
+      });
+    });
+
+    it('returns null for mux-gone missing sessionCode', () => {
+      expect(parseSwMessage({ type: 'mux-gone' })).toBeNull();
+    });
+
     it('parses relay-error with known reason', () => {
       const result = parseSwMessage({ type: 'relay-error', streamId: 1, reason: 'disconnect' });
       expect(result).toEqual({ type: 'relay-error', streamId: 1, reason: 'disconnect' });
@@ -62,6 +85,16 @@ describe('sw-bridge', () => {
       const msg = { type: 'mux-ready', sessionCode: 'xyz789' } as const;
       const serialized = serializeSwMessage(msg);
       expect(parseSwMessage(serialized)).toEqual(msg);
+    });
+
+    it('round-trips iframe-owner through serialize then parse', () => {
+      const msg = { type: 'iframe-owner', sessionCode: 'iframe-session' } as const;
+      expect(parseSwMessage(serializeSwMessage(msg))).toEqual(msg);
+    });
+
+    it('round-trips mux-gone through serialize then parse', () => {
+      const msg = { type: 'mux-gone', sessionCode: 'gone-session' } as const;
+      expect(parseSwMessage(serializeSwMessage(msg))).toEqual(msg);
     });
   });
 });

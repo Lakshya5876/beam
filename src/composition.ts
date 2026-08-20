@@ -358,6 +358,17 @@ export function runRelayLoop(deps: RelayDependencies): Unsubscribe {
 
 const BACKPRESSURE_POLL_MS = 25;
 
+/**
+ * How often the host checks whether its own session has outlived its TTL
+ * (SECURITY_AUDIT_20-08.md finding #3). Coarse on purpose: the TTL itself is
+ * measured in hours (DEFAULT_SESSION_TTL_MS, 4h — see domain/session.ts), so
+ * a session running up to this long past its nominal expiry is an
+ * acceptable margin, and polling (rather than a single setTimeout sized to
+ * ttlMs at session start) means a session's effective TTL is still honored
+ * even though HostOptions.now is injectable and could, in principle, jump.
+ */
+const TTL_POLL_MS = 30_000;
+
 /** Poll-based drain: resolves once the channel's buffered bytes fall to the
  *  low-water mark. Keys off the PeerTransport.bufferedAmount() seam — no new
  *  interface method needed. */
@@ -450,7 +461,22 @@ export function composeHost(options: HostOptions, factories: HostFactories = rea
   applyRemoteSignals(signaling, peer);
   runRelayLoop({ mux, relay, wsRelayClient, recorder, allowedPaths: options.allowedPaths ?? [], now, waitForDrain: pollDrain(peer, LOW_WATER_MARK) });
 
-  return {
+  // SECURITY_AUDIT_20-08.md finding #3: THIS is the enforcement the design
+  // docs (docs/USER_FLOW.md "Session TTL expires (host-side)") already
+  // describe and session-use-case.ts's isExpired() was already unit-tested
+  // for — nothing previously called either. Cleared on any terminal session
+  // event so a session that ends some other way (connection failure, Ctrl-C)
+  // doesn't leave a poll timer keeping the process alive for up to ttlMs
+  // afterward, which it did not do before this fix either.
+  let ttlTimer: ReturnType<typeof setInterval> | null = null;
+  const stopTtlWatch = (): void => {
+    if (ttlTimer !== null) {
+      clearInterval(ttlTimer);
+      ttlTimer = null;
+    }
+  };
+
+  const runtime: HostRuntime = {
     session,
     diagnostics,
     async start(rawCode) {
@@ -459,9 +485,21 @@ export function composeHost(options: HostOptions, factories: HostFactories = rea
         return started;
       }
       void runConnection(peer, session);
+      ttlTimer = setInterval(() => {
+        if (session.isExpired(now())) {
+          stopTtlWatch();
+          void runtime.close('ttl-expired');
+        }
+      }, TTL_POLL_MS);
+      session.onEvent((event) => {
+        if (event.event === 'SessionClosed' || event.event === 'SessionFailed') {
+          stopTtlWatch();
+        }
+      });
       return ok();
     },
     async close(reason) {
+      stopTtlWatch();
       peer.close();
       await session.closeSession(reason);
     },
@@ -469,4 +507,5 @@ export function composeHost(options: HostOptions, factories: HostFactories = rea
       return signaling.registerPin(hash);
     },
   };
+  return runtime;
 }

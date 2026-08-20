@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import {
   createFetchGate,
   enqueue,
+  escapeHtml,
+  make504,
   nextStreamId,
   onMuxGone,
   onMuxReady,
@@ -197,5 +199,25 @@ describe('shouldBypassRelay — viewer own-asset exclusion', () => {
   it('relays the shell iframe navigating to any other path too', () => {
     expect(shouldBypassRelay('/dashboard', 'iframe')).toBe(false);
     expect(shouldBypassRelay('/assets/app.js', 'iframe')).toBe(false);
+  });
+});
+
+describe('escapeHtml / make504 — the 504 page never interpolates raw HTML (SECURITY_AUDIT_20-08.md finding #8)', () => {
+  it('escapes the five HTML-significant characters', () => {
+    expect(escapeHtml(`<script>alert('&"')</script>`)).toBe(
+      '&lt;script&gt;alert(&#39;&amp;&quot;&#39;)&lt;/script&gt;',
+    );
+  });
+
+  it('leaves ordinary text untouched', () => {
+    expect(escapeHtml('stream-cap-exceeded')).toBe('stream-cap-exceeded');
+  });
+
+  it('make504 never emits an unescaped tag from its reason, even a maximally hostile one', async () => {
+    const response = make504('<img src=x onerror=alert(document.domain)>');
+    const body = await response.text();
+    expect(body).not.toContain('<img');
+    expect(body).toContain('&lt;img');
+    expect(response.status).toBe(504);
   });
 });

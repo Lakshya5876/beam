@@ -42,20 +42,49 @@ export function buildMdnsQuery(hostname: string): Uint8Array {
 }
 
 /**
+ * Bound on DNS name-compression pointer jumps (RFC 1035 §4.1.4) followed
+ * while decoding one name. A real response — these are tiny mDNS packets
+ * for a single UUID.local record — never needs more than one or two; this
+ * exists purely as a circuit breaker (SECURITY_AUDIT_20-08.md finding #4).
+ * Before this fix, a crafted response whose pointer chain cycled back on
+ * itself (e.g. the pointer at offset X pointing to X, or a short loop
+ * through a few offsets) made the `while` loop below spin forever — `pos`
+ * kept jumping between the same offsets while `pos < msg.length` stayed
+ * true, with no other exit condition. This resolver listens on a UDP socket
+ * bound to the mDNS multicast group (224.0.0.251:5353), so any device on the
+ * same local network segment as the host — a shared Wi-Fi, an untrusted
+ * office LAN — could send that one crafted datagram and hang the ENTIRE
+ * `bm` process (Node is single-threaded; a synchronous infinite loop inside
+ * this socket's 'message' handler blocks the whole event loop, including
+ * the WebRTC negotiation and relay loop, for as long as the process runs).
+ */
+const MAX_POINTER_JUMPS = 128;
+
+/**
  * Read a DNS wire-format name starting at offset, following compression
  * pointers (RFC 1035 §4.1.4). Returns the decoded name and the offset of
- * the first byte AFTER the name (ignoring any pointer jumps).
+ * the first byte AFTER the name (ignoring any pointer jumps). Total: a
+ * pointer chain that exceeds MAX_POINTER_JUMPS (cyclic or merely too long
+ * to be genuine) aborts decoding and returns whatever was read so far,
+ * rather than looping — the caller compares the result against a known
+ * hostname, so a truncated/wrong name just fails to match, exactly like any
+ * other malformed response, instead of hanging the process.
  */
 export function readDnsName(msg: Uint8Array, offset: number): { name: string; next: number } {
   const labels: string[] = [];
   let pos = offset;
   let jumped = false;
   let next = offset;
+  let jumps = 0;
 
   while (pos < msg.length) {
     const len = msg[pos];
     if (len === undefined) break;
     if ((len & 0xc0) === 0xc0) {
+      jumps += 1;
+      if (jumps > MAX_POINTER_JUMPS) {
+        break;
+      }
       const ptr = ((len & 0x3f) << 8) | (msg[pos + 1] ?? 0);
       if (!jumped) next = pos + 2;
       pos = ptr;

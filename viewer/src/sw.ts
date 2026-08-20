@@ -1,33 +1,63 @@
 /// <reference lib="webworker" />
 /**
  * Service Worker entry point (S16 — impure boundary, verified live at S18).
- * Thin glue over sw-fetch-gate.ts and sw-bridge.ts pure modules.
+ * Thin glue over sw-fetch-gate.ts, sw-session-registry.ts, and sw-bridge.ts
+ * pure modules.
  *
  * Path-based exclusion (N1, see sw-fetch-gate.ts shouldBypassRelay): /,
  * /assets/*, and /__beam/* pass through — the viewer's own shell, bundle,
  * and bootstrap assets. Everything else same-origin is relayed.
- * Single-document/SPA apps only in v1 — see LIMITATIONS.md.
+ *
+ * SESSION ISOLATION (SECURITY_AUDIT_20-08.md finding #1): this SW instance
+ * can be controlling several unrelated Beam sessions' tabs at once. Every
+ * fetch is attributed to a specific session BEFORE it is dispatched to that
+ * session's own FetchGate (sw-session-registry.ts) — never to "whichever
+ * session most recently connected". An unattributable fetch fails closed
+ * (504) rather than guessing.
  */
 
 import { parseSwMessage, serializeSwMessage } from './sw-bridge.js';
 import { ResponseAssembler } from './response-assembler.js';
 import {
-  createFetchGate,
   enqueue,
+  make504,
   nextStreamId,
-  onMuxReady,
   shouldBypassRelay,
   trackStreamClose,
   RELAY_TIMEOUT_MS,
+  type FetchGate,
 } from './sw-fetch-gate.js';
+import {
+  createSessionRegistry,
+  dropSession,
+  gateFor,
+  knownSessionFor,
+  registerClientOwner,
+  registerSessionSource,
+  waitForClientOwner,
+  type SessionRegistry,
+} from './sw-session-registry.js';
+import { extractSessionCodeFromUrl } from './viewer-url.js';
 import { encodeFrame, decodeFrame, FrameType, isFrameDecodeError } from './protocol-bridge.js';
 import { encodeRequest } from './request-serializer.js';
 
 declare const self: ServiceWorkerGlobalScope;
 
-const gate = createFetchGate();
-const assemblers = new Map<number, ResponseAssembler>();
-const responseResolvers = new Map<number, (r: Response) => void>();
+const registry: SessionRegistry = createSessionRegistry();
+
+/** Keyed by `${sessionCode}:${streamId}` — NEVER a bare streamId. Stream ids
+ *  are only unique within one session's own gate (each session's counter
+ *  starts at 1 independently), so a bare-number key would let two sessions'
+ *  in-flight streams collide and cross-deliver responses the moment both
+ *  happened to be mid-request at once. This is the second half of finding
+ *  #1's fix: gate.source routing alone is not enough if this bookkeeping can
+ *  still cross-wire. */
+const assemblers = new Map<string, ResponseAssembler>();
+const responseResolvers = new Map<string, (r: Response) => void>();
+
+function bookKey(sessionCode: string, streamId: number): string {
+  return `${sessionCode}:${String(streamId)}`;
+}
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -40,18 +70,17 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
   const msg = parseSwMessage(event.data as unknown);
   if (!msg) return;
-  handleSwMessage(msg, event.source as WindowClient);
+  const source = event.source as WindowClient;
+  if (msg.type === 'mux-ready') handleMuxReady(source, msg.sessionCode);
+  else if (msg.type === 'iframe-owner') handleIframeOwner(source, msg.sessionCode);
+  else if (msg.type === 'mux-gone') handleMuxGone(msg.sessionCode);
+  else if (msg.type === 'relay-response' || msg.type === 'relay-error') handleFromOuterWindow(source, msg);
 });
 
-function handleSwMessage(msg: ReturnType<typeof parseSwMessage>, source: WindowClient): void {
-  if (!msg) return;
-  if (msg.type === 'mux-ready') handleMuxReady(source, msg.sessionCode);
-  else if (msg.type === 'relay-response') handleRelayResponse(msg.streamId, msg.data);
-  else if (msg.type === 'relay-error') handleRelayError(msg.streamId, msg.reason);
-}
-
 function handleMuxReady(source: WindowClient, sessionCode: string): void {
-  const toFlush = onMuxReady(source, sessionCode, gate as typeof gate & { source: WindowClient | null });
+  const registered = registerSessionSource(registry, sessionCode, source);
+  if (!registered) return; // this client id already claimed a DIFFERENT session — never rebind, see tryBind
+  const { gate, toFlush } = registered;
   for (const item of toFlush) {
     clearTimeout(item.timer);
     const idx = gate.pending.indexOf(item);
@@ -60,7 +89,45 @@ function handleMuxReady(source: WindowClient, sessionCode: string): void {
   }
 }
 
-function handleRelayResponse(streamId: number, frameBytes: Uint8Array): void {
+function handleIframeOwner(source: WindowClient, sessionCode: string): void {
+  registerClientOwner(registry, source.id, sessionCode);
+}
+
+/** The session's DataChannel/mux is gone — fail every stream still open or
+ *  queued for it and forget its routing so a stale sessionCode can never
+ *  again resolve to a dead target. */
+function handleMuxGone(sessionCode: string): void {
+  const dropped = dropSession(registry, sessionCode);
+  if (!dropped) return;
+  for (const item of dropped.pending) {
+    clearTimeout(item.timer);
+    item.resolve({ ok: false, response: make504('disconnect') });
+  }
+  for (const streamId of dropped.openStreamIds) {
+    finishWithError(sessionCode, streamId, 'disconnect');
+  }
+}
+
+/** 'relay-response' / 'relay-error' only ever come from the outer window that
+ *  registered itself via 'mux-ready' — the sender's OWN client id (not
+ *  anything the message body claims) determines which session's bookkeeping
+ *  to touch. A message from an unregistered sender is dropped: it cannot be
+ *  attributed to any session, so there is nothing safe to do with it. */
+function handleFromOuterWindow(
+  source: WindowClient,
+  msg: { type: 'relay-response' | 'relay-error'; streamId: number; data?: Uint8Array; reason?: string },
+): void {
+  const sessionCode = knownSessionFor(registry, source.id);
+  if (!sessionCode) return;
+  if (msg.type === 'relay-response' && msg.data) {
+    handleRelayResponse(sessionCode, msg.streamId, msg.data);
+  } else if (msg.type === 'relay-error') {
+    const reason = msg.reason ?? 'relay error';
+    finishWithError(sessionCode, msg.streamId, reason);
+  }
+}
+
+function handleRelayResponse(sessionCode: string, streamId: number, frameBytes: Uint8Array): void {
   const frame = decodeFrame(frameBytes);
   if (isFrameDecodeError(frame)) return;
 
@@ -69,25 +136,25 @@ function handleRelayResponse(streamId: number, frameBytes: Uint8Array): void {
   // variant was caught by the local e2e harness).
   if (frame.type === FrameType.ERROR) {
     const reason = new TextDecoder().decode(frame.payload) || 'relay error';
-// console.log(`[SW] ERROR frame sid=${String(streamId)} reason=${reason}`);
-    handleRelayError(streamId, reason);
+    finishWithError(sessionCode, streamId, reason);
     return;
   }
 
-  let assembler = assemblers.get(streamId);
+  const key = bookKey(sessionCode, streamId);
+  let assembler = assemblers.get(key);
   if (!assembler) {
     assembler = new ResponseAssembler();
-    assemblers.set(streamId, assembler);
+    assemblers.set(key, assembler);
   }
 
   const feedResult = assembler.feed(frame);
 
   // Resolve respondWith on first RESPONSE_HEAD (streaming body continues after)
-  const resolver = responseResolvers.get(streamId);
+  const resolver = responseResolvers.get(key);
   if (resolver) {
     try {
       const response = assembler.buildResponse();
-      responseResolvers.delete(streamId);
+      responseResolvers.delete(key);
       resolver(response);
     } catch {
       // buildResponse throws before RESPONSE_HEAD — ignore, wait for next frame
@@ -95,112 +162,168 @@ function handleRelayResponse(streamId: number, frameBytes: Uint8Array): void {
   }
 
   if (feedResult === 'complete' || feedResult === 'error') {
-    assemblers.delete(streamId);
-    trackStreamClose(streamId, gate);
+    assemblers.delete(key);
+    finishStream(sessionCode, streamId);
   }
 }
 
-function handleRelayError(streamId: number, reason: string): void {
-  assemblers.get(streamId)?.abort(reason);
-  assemblers.delete(streamId);
-  const resolver = responseResolvers.get(streamId);
+function finishWithError(sessionCode: string, streamId: number, reason: string): void {
+  const key = bookKey(sessionCode, streamId);
+  assemblers.get(key)?.abort(reason);
+  assemblers.delete(key);
+  const resolver = responseResolvers.get(key);
   if (resolver) {
-    responseResolvers.delete(streamId);
+    responseResolvers.delete(key);
     resolver(make504(reason));
   }
-  trackStreamClose(streamId, gate);
+  finishStream(sessionCode, streamId);
+}
+
+function finishStream(sessionCode: string, streamId: number): void {
+  const gate = registry.gates.get(sessionCode);
+  if (gate) trackStreamClose(streamId, gate);
 }
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (shouldBypassRelay(url.pathname, event.request.destination)) return; // Viewer's own shell/bundle/bootstrap assets — pass through (never the iframe's own navigations, see shouldBypassRelay)
   if (url.origin !== self.location.origin) return;  // Cross-origin — pass through
-  const streamId = nextStreamId(gate);
-
-  // SW restart recovery: if gate state was lost (SW terminated while idle), pull
-  // mux-ready from all window clients instead of waiting for a one-shot push that
-  // already fired into the previous SW instance and is now gone.
-  if (!gate.ready) {
-    void self.clients.matchAll({ type: 'window' }).then((clients) => {
-      const msg = serializeSwMessage({ type: 'request-mux-ready' });
-      for (const client of clients) client.postMessage(msg);
-    });
-  }
-
-  event.respondWith(handleFetch(streamId, event.request, event.clientId));
+  event.respondWith(handleFetch(event.request, event.clientId));
 });
 
 /**
- * The relay target must be the document that OWNS the mux — the outer shell
- * that holds the RTCPeerConnection and answers 'relay-request'. That is
- * exactly the client which sent 'mux-ready', i.e. gate.source.
- *
- * Preferring the fetch's own clientId (as this did) silently broke every
- * request made BY the tunneled app: the app runs inside the iframe, so
- * event.clientId is the IFRAME's client, and the frames were posted to a
- * document with no relay listener — the request then hung until it timed out.
- * Only the iframe's top-level NAVIGATION worked, because a navigation request
- * has no client yet (empty clientId) and so fell through to gate.source.
- *
- * gate.source is only ever set by a live mux-ready, and a service-worker
- * restart clears it entirely (module state is lost) — at which point the
- * fetch handler re-arms it by asking the window clients. So it cannot go
- * stale in a way that clientId would rescue; clientId remains only as a
- * last-resort fallback for a fetch arriving before the first mux-ready.
+ * Ask every window client (every tab this SW controls, across every
+ * session) to re-announce itself: outer windows re-send 'mux-ready',
+ * tunneled-app iframes re-send 'iframe-owner' (see ws-shim.ts). Used both
+ * for SW-restart recovery (module state — the whole registry — was lost)
+ * and for a plain unregistered client id, since either way the only safe
+ * thing to do is ask, never guess.
  */
-async function resolveRelayTarget(clientId: string): Promise<WindowClient | null> {
-  if (gate.source) {
-    return gate.source as WindowClient;
+function requestReannounce(): void {
+  void self.clients.matchAll({ type: 'window' }).then((clients) => {
+    const msg = serializeSwMessage({ type: 'request-mux-ready' });
+    for (const client of clients) client.postMessage(msg);
+  });
+}
+
+/**
+ * Attribute a fetch to exactly one session, or null if it cannot be —
+ * NEVER a fallback to "whichever session is current" (that was the Critical
+ * cross-session hijack this module fixes; see file doc and
+ * SECURITY_AUDIT_20-08.md finding #1).
+ *
+ *   1. A client id we already have an owner for (the common case for every
+ *      fetch after the first on a page: images, XHR/fetch calls, subsequent
+ *      SPA navigations that don't reload the document).
+ *   2. A brand-new iframe navigation has no client yet (clientId is empty —
+ *      nothing has loaded there before), so the only signal available BEFORE
+ *      any response has been seen is the referring document's own URL: the
+ *      OUTER window set `frame.src` on a same-origin target, so the browser
+ *      sends the outer window's full URL (including its session code) as
+ *      this navigation's referrer. Trusted ONLY for an actual navigation
+ *      (`request.mode === 'navigate'`) — a page can freely pass a spoofed,
+ *      same-origin `referrer` option to its OWN fetch()/XHR calls (case 1
+ *      already covers those anyway via the client id), but it cannot forge
+ *      the Referer the browser sends for a real navigation it triggers,
+ *      which is exactly the property this path depends on. A LATER
+ *      full-page navigation *within* the already-loaded iframe carries the
+ *      iframe's own prior client id instead (case 1), not the outer
+ *      window's URL, which is why this path alone is not sufficient for the
+ *      whole session lifetime — case 3 covers that.
+ *   3. Neither of the above resolved anything: either this SW instance was
+ *      just restarted (all in-memory registry state, and the browser's own
+ *      per-client identity together, were lost) or the owning session simply
+ *      hasn't announced itself yet. Ask every client to re-announce and wait
+ *      briefly. If nothing claims this client id in time, fail closed.
+ *      registerClientOwner's first-claim-wins rule (sw-session-registry.ts)
+ *      means whatever wins this race is permanent for this client id — see
+ *      that function's doc for why a SECOND, contradicting claim can never
+ *      override it later, which is what actually matters here: even a
+ *      compromised tunneled app racing its own forged 'iframe-owner' claim
+ *      can only ever contest the FIRST assignment, never hijack an
+ *      already-correctly-bound client away from its real session.
+ */
+async function resolveSession(request: Request, clientId: string): Promise<string | null> {
+  const known = knownSessionFor(registry, clientId);
+  if (known) return known;
+
+  if (request.mode === 'navigate') {
+    const fromReferrer = extractSessionCodeFromUrl(request.referrer);
+    if (fromReferrer) return fromReferrer;
   }
-  if (clientId) {
-    const fetchClient = await self.clients.get(clientId);
-    if (fetchClient) return fetchClient as WindowClient;
-  }
-  return null;
+
+  if (!clientId) return null; // nothing to correlate a re-announce against
+  requestReannounce();
+  return waitForClientOwner(registry, clientId);
 }
 
 function postRelayFrames(source: WindowClient, streamId: number, frames: ReturnType<typeof encodeRequest>): void {
   for (const frame of frames) {
-// console.log(`[SW] posting relay-request sid=${String(streamId)} frameType=${String(frame.type)}`);
     source.postMessage(serializeSwMessage({ type: 'relay-request', streamId, data: encodeFrame(frame) }));
   }
-// console.log(`[SW] all frames posted sid=${String(streamId)} count=${String(frames.length)}`);
 }
 
-async function handleFetch(streamId: number, request: Request, clientId: string): Promise<Response> {
+/**
+ * Resolve which session owns this fetch AND make sure that clientId is
+ * registered for next time — split out of handleFetch purely to keep that
+ * function's branching within the lint complexity budget; the two steps
+ * always run together.
+ */
+async function resolveSessionAndRegister(request: Request, clientId: string): Promise<string | null> {
+  const sessionCode = await resolveSession(request, clientId);
+  if (!sessionCode) return null;
+  // Resolved via the referrer (a brand-new iframe navigation) or a fresh
+  // re-announce — either way this exact clientId may not be registered yet.
+  // Register it now so every later fetch from the same client resolves
+  // directly, without re-parsing a referrer or waiting again.
+  if (clientId && knownSessionFor(registry, clientId) !== sessionCode) {
+    registerClientOwner(registry, clientId, sessionCode);
+  }
+  return sessionCode;
+}
+
+/** Build the REQUEST_HEAD + REQUEST_BODY_CHUNK(s) + REQUEST_END frames for one relayed fetch. */
+async function buildRequestFrames(streamId: number, request: Request): Promise<ReturnType<typeof encodeRequest>> {
+  const bodyBytes = request.body ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array(0);
+  const reqUrl = new URL(request.url);
+  const path = reqUrl.pathname + (reqUrl.search ?? '');
+  // Record shape — the host's decodeRequestHead contract (NOT array-of-pairs).
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, name) => { headers[name] = value; });
+  return encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
+}
+
+async function handleFetch(request: Request, clientId: string): Promise<Response> {
+  // Tracked outside the try body so the catch clause can release this
+  // stream's slot from the RIGHT session's gate if something throws after
+  // it was opened — mirrors the pre-fix behavior, now session-scoped.
+  let opened: { sessionCode: string; streamId: number } | null = null;
   try {
-// console.log(`[SW] fetch sid=${String(streamId)} ready=${String(gate.ready)} clientId=${clientId}`);
+    const sessionCode = await resolveSessionAndRegister(request, clientId);
+    if (!sessionCode) return make504('no-session');
+
+    const gate: FetchGate = gateFor(registry, sessionCode);
+    const streamId = nextStreamId(gate);
+    opened = { sessionCode, streamId };
+    if (!gate.ready) {
+      requestReannounce();
+    }
+
     const result = await enqueue(streamId, RELAY_TIMEOUT_MS, gate);
     if (!result.ok) return result.response;
 
-    // Prefer the fetch event's own clientId over the stored gate.source.
-    // gate.source can be stale after a SW restart + re-arm cycle.
-    const source = await resolveRelayTarget(clientId);
-// console.log(`[SW] relay target sid=${String(streamId)} hasSource=${String(source !== null)}`);
+    const source = gate.source as WindowClient | null;
     if (!source) return make504('no-source');
 
-    const bodyBytes = request.body ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array(0);
-    const reqUrl = new URL(request.url);
-    const path = reqUrl.pathname + (reqUrl.search ?? '');
-    // Record shape — the host's decodeRequestHead contract (NOT array-of-pairs).
-    const headers: Record<string, string> = {};
-    request.headers.forEach((value, name) => { headers[name] = value; });
-
-    const frames = encodeRequest(streamId, { method: request.method, path, headers, body: bodyBytes });
+    const frames = await buildRequestFrames(streamId, request);
     postRelayFrames(source, streamId, frames);
 
     return new Promise<Response>((resolve) => {
-      responseResolvers.set(streamId, resolve);
+      responseResolvers.set(bookKey(sessionCode, streamId), resolve);
     });
   } catch (err) {
-    trackStreamClose(streamId, gate);
+    if (opened) finishStream(opened.sessionCode, opened.streamId);
     return make504(`internal: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-function make504(reason: string): Response {
-  return new Response(
-    `<html><body><h1>Beam: relay unavailable</h1><p>${reason}</p></body></html>`,
-    { status: 504, statusText: 'Gateway Timeout', headers: { 'content-type': 'text/html' } },
-  );
-}

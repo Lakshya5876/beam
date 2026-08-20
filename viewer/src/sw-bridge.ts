@@ -1,5 +1,7 @@
 export type SwMessage =
   | { type: 'mux-ready'; sessionCode: string }
+  | { type: 'iframe-owner'; sessionCode: string }
+  | { type: 'mux-gone'; sessionCode: string }
   | { type: 'request-mux-ready' }
   | { type: 'relay-request'; streamId: number; data: Uint8Array }
   | { type: 'relay-response'; streamId: number; data: Uint8Array }
@@ -9,9 +11,12 @@ type RawMsg = { type?: unknown; sessionCode?: unknown; streamId?: unknown; data?
 
 const RELAY_ERROR_REASONS = new Set<string>(['disconnect', 'stream-cap-exceeded', 'internal']);
 
-function parseMuxReady(msg: RawMsg): SwMessage | null {
+function parseSessionCodeMessage<T extends 'mux-ready' | 'iframe-owner' | 'mux-gone'>(
+  type: T,
+  msg: RawMsg,
+): SwMessage | null {
   if (typeof msg.sessionCode !== 'string') return null;
-  return { type: 'mux-ready', sessionCode: msg.sessionCode };
+  return { type, sessionCode: msg.sessionCode };
 }
 
 function parseRelayData(type: 'relay-request' | 'relay-response', msg: RawMsg): SwMessage | null {
@@ -32,7 +37,9 @@ function parseRelayError(msg: RawMsg): SwMessage | null {
 export function parseSwMessage(data: unknown): SwMessage | null {
   if (typeof data !== 'object' || data === null) return null;
   const msg = data as RawMsg;
-  if (msg.type === 'mux-ready') return parseMuxReady(msg);
+  if (msg.type === 'mux-ready') return parseSessionCodeMessage('mux-ready', msg);
+  if (msg.type === 'iframe-owner') return parseSessionCodeMessage('iframe-owner', msg);
+  if (msg.type === 'mux-gone') return parseSessionCodeMessage('mux-gone', msg);
   if (msg.type === 'request-mux-ready') return { type: 'request-mux-ready' };
   if (msg.type === 'relay-request') return parseRelayData('relay-request', msg);
   if (msg.type === 'relay-response') return parseRelayData('relay-response', msg);
