@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023"],
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "//": "Workers-runtime pass for the one test file (test/session-do.test.ts) that exercises the Durable Object directly against hand-rolled fakes of the DurableObjectState/WebSocket globals — it needs the same Workers typing as tsconfig.worker.json, not the Node typing every other test file uses under tsconfig.json (which excludes session-do.ts and this test file for exactly that reason). Mirrors tsconfig.worker.json's include plus the one test file.",
+  "include": ["src/**/*.ts", "worker-configuration.d.ts", "test/session-do.test.ts"]
+}

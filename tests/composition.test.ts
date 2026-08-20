@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createFramePayload,
   createStreamId,
@@ -601,6 +601,101 @@ describe('composeHost — wiring with injected fakes', () => {
     const result = await runtime.registerPin(fakeHash);
     expect(result.ok).toBe(true);
     expect(signaling.registeredPinHashes).toContain(fakeHash);
+  });
+});
+
+describe('composeHost — session TTL enforcement (SECURITY_AUDIT_20-08.md finding #3, High)', () => {
+  // docs/USER_FLOW.md documents this exact flow ("Host's
+  // ExecuteSessionUseCase.isExpired() triggers... Host calls
+  // runtime.close('ttl-expired')") and session-use-case.test.ts already
+  // unit-tests isExpired() in isolation — neither proves anything actually
+  // CALLS it in the running host. These tests do, against composeHost itself.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function runtimeWithClock(nowRef: { value: number }, ttlMs?: number) {
+    const signaling = new FakeSignalingClient();
+    const peer = new FakeHostPeer();
+    const factories: HostFactories = {
+      createLogStore: () => new FakeRequestLogRepository(),
+      createReplayClient: () => makeReplayClient(() => ok({ status: 200, headers: {}, body: new Uint8Array(0) })).client,
+      createWsRelayClient: () => new NoopWsRelayClient(),
+      createSignalingClient: () => signaling,
+      createIceConfigClient: () => stubIceConfigClient(),
+      createPeer: () => peer,
+    };
+    const runtime = composeHost(
+      { localPort: 3000, signalingUrl: 'ws://127.0.0.1:9', now: () => nowRef.value, ...(ttlMs !== undefined && { ttlMs }) },
+      factories,
+    );
+    return { runtime, peer };
+  }
+
+  it('closes the session on its own once the TTL elapses, with no external trigger', async () => {
+    const nowRef = { value: 1_000 };
+    const { runtime, peer } = runtimeWithClock(nowRef, 60_000); // 60s TTL
+    peer.setConnectResult(ok());
+    await runtime.start('k7x2m9q4w8r3t6y1u5z0a2b4c7');
+    await vi.advanceTimersByTimeAsync(0); // fake timers active — flush() alone would never resolve
+    expect(runtime.session.state()).toBe('established');
+
+    // Advance the injected clock past the TTL boundary AND the real timers
+    // that drive the poll — vi.useFakeTimers() controls both setInterval and
+    // Date.now()-independent code alike, but this runtime reads time only
+    // through the injected `now`, so both must move together.
+    nowRef.value += 61_000;
+    await vi.advanceTimersByTimeAsync(31_000); // one TTL_POLL_MS tick
+
+    expect(runtime.session.state()).toBe('closed');
+  });
+
+  it('does not close a session before its TTL elapses', async () => {
+    const nowRef = { value: 1_000 };
+    const { runtime, peer } = runtimeWithClock(nowRef, 60_000);
+    peer.setConnectResult(ok());
+    await runtime.start('k7x2m9q4w8r3t6y1u5z0a2b4c7');
+    await vi.advanceTimersByTimeAsync(0);
+
+    nowRef.value += 30_000; // well under the 60s TTL
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(runtime.session.state()).toBe('established');
+  });
+
+  it('stops polling once the session ends some other way (no leaked timer keeping the process alive)', async () => {
+    const nowRef = { value: 1_000 };
+    const { runtime, peer } = runtimeWithClock(nowRef, 60_000);
+    peer.setConnectResult(ok());
+    await runtime.start('k7x2m9q4w8r3t6y1u5z0a2b4c7');
+    await vi.advanceTimersByTimeAsync(0);
+
+    await runtime.close('host interrupted (SIGINT)');
+    expect(runtime.session.state()).toBe('closed');
+
+    // If the poll timer were still armed, advancing past the TTL here would
+    // attempt a second, redundant close — assert no crash and state is
+    // unchanged (closeSession on an already-closed session is a no-op,
+    // proving the interval either never fires again or is harmless either way).
+    nowRef.value += 61_000;
+    await vi.advanceTimersByTimeAsync(31_000); // must not throw — proves no dangling handler misfires
+    expect(runtime.session.state()).toBe('closed');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a connection failure (never established) also stops the TTL poll rather than leaking it', async () => {
+    const nowRef = { value: 1_000 };
+    const { runtime, peer } = runtimeWithClock(nowRef, 60_000);
+    peer.setConnectResult(err({ error: 'PeerConnectFailed', reason: 'no-viable-candidate' }));
+    await runtime.start('k7x2m9q4w8r3t6y1u5z0a2b4c7');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.session.state()).toBe('failed');
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

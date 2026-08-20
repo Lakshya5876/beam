@@ -21,7 +21,17 @@ export function renderConnecting(): string {
  * (see sw-fetch-gate.ts shouldBypassRelay's destination==='iframe' case).
  */
 export function renderConnectedShell(): string {
-  return `<iframe id="beam-frame" title="Tunneled application" style="position:fixed;inset:0;width:100%;height:100%;border:0;"></iframe>`;
+  // referrerpolicy="same-origin": the FIRST navigation into this iframe is
+  // how the Service Worker attributes that request to this exact session
+  // before the iframe has a client of its own to identify itself by (see
+  // sw.ts resolveSession / SECURITY_AUDIT_20-08.md finding #1) — it reads
+  // the outer document's own URL (which carries the session code) from the
+  // navigation's Referer. Pinning the policy explicitly means that
+  // continues to work even if a future response header or default policy
+  // change would otherwise suppress it, while still sending no referrer at
+  // all for any cross-origin request the tunneled app's own iframe later
+  // makes on its own.
+  return `<iframe id="beam-frame" title="Tunneled application" referrerpolicy="same-origin" style="position:fixed;inset:0;width:100%;height:100%;border:0;"></iframe>`;
 }
 
 export function renderFailed(reason: string): string {

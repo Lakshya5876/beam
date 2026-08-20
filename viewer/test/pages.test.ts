@@ -26,6 +26,11 @@ describe('pages (pure render helpers)', () => {
     expect(html).toContain('id="beam-frame"');
     expect(html).not.toContain('src=');
   });
+
+  it('pins referrerpolicy="same-origin" so the SW can attribute the first iframe navigation to its session (SECURITY_AUDIT_20-08.md #1)', () => {
+    const html = renderConnectedShell();
+    expect(html).toContain('referrerpolicy="same-origin"');
+  });
 });
 
 describe('PIN pages', () => {

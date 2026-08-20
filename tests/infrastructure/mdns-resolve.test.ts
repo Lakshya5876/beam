@@ -62,6 +62,55 @@ describe('readDnsName', () => {
     expect(name).toBe('foo.local');
     expect(next).toBe(13); // pointer occupies 2 bytes
   });
+
+  // SECURITY_AUDIT_20-08.md finding #4 (Medium): a crafted response whose
+  // compression pointer chain cycles back on itself used to spin this
+  // function's while loop forever — Node is single-threaded, so this hung
+  // the ENTIRE `bm` process, reachable by anyone able to send one UDP
+  // datagram to the multicast group this resolver joins (any device on the
+  // same local network segment as the host). Each of these completes
+  // near-instantly against the fix; a regression that removes the jump cap
+  // would hang the test process itself, not just fail an assertion — see
+  // this suite's own verification notes in SECURITY_AUDIT_20-08.md for how
+  // that was confirmed against the pre-fix code with an external timeout.
+  describe('compression-pointer cycle guard (SECURITY_AUDIT_20-08.md finding #4)', () => {
+    it('a pointer that points at itself terminates instead of looping forever', () => {
+      const msg = new Uint8Array([0xc0, 0x00]); // offset 0 points back to offset 0
+      const { name } = readDnsName(msg, 0);
+      expect(name).toBe('');
+    });
+
+    it('a short cycle of pointers (A -> B -> A) terminates', () => {
+      // offset 0: pointer to offset 2; offset 2: pointer to offset 0
+      const msg = new Uint8Array([0xc0, 0x02, 0xc0, 0x00]);
+      const { name } = readDnsName(msg, 0);
+      expect(name).toBe('');
+    });
+
+    it('a long but non-cyclic pointer chain past the jump cap also terminates', () => {
+      // A chain of 200 two-byte pointers, each pointing to the next — no
+      // cycle, but far beyond anything a genuine mDNS response would ever
+      // need, so it must still be rejected rather than followed to the end.
+      const chainLength = 200;
+      const bytes: number[] = [];
+      for (let i = 0; i < chainLength; i += 1) {
+        const nextOffset = (i + 1) * 2;
+        bytes.push(0xc0 | (nextOffset >> 8), nextOffset & 0xff);
+      }
+      bytes.push(0); // terminator, never reached
+      const msg = new Uint8Array(bytes);
+      const { name } = readDnsName(msg, 0);
+      expect(name).toBe('');
+    });
+
+    it('a legitimate short pointer chain (well under the cap) still resolves correctly', () => {
+      // 'foo.local' at offset 0; offset 11 points to it; offset 13 points to offset 11.
+      const base = new Uint8Array([3, 102, 111, 111, 5, 108, 111, 99, 97, 108, 0]);
+      const msg = new Uint8Array([...base, 0xc0, 0x00, 0xc0, 0x0b]);
+      const { name } = readDnsName(msg, 13);
+      expect(name).toBe('foo.local');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

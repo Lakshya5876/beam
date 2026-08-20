@@ -26,3 +26,8 @@ npm-debug.log*
 # Local governance-bootstrap reference material — not project documentation
 v1_claude_code_development_guide_existing.md
 v1_implementation_package_existing.md
+
+# Local security audit reports — never committed
+SECURITY_AUDIT.md
+SECURITY_AUDIT*.md
+SECURITY_AUDIT_20/

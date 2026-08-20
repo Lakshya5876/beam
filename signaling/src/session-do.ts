@@ -27,6 +27,34 @@
  * hold the slot forever — the wrong-PIN lockout already frees it after 3
  * attempts, this covers the "never attempts" case.
  *
+ * Security invariant (SECURITY_AUDIT_20-08.md finding #2 — host-role hijack):
+ * role assignment is "first to (re-)connect to this code claims the free
+ * slot" with no per-connection identity beyond that. Before this fix,
+ * PIN_VERIFIED_KEY was written once and never cleared, so if either peer's
+ * socket ever dropped (a network blip, a laptop sleeping — ordinary events
+ * over a session's lifetime, not just attacker action) the vacated role slot
+ * could be reclaimed by ANY holder of the session code — including someone
+ * who never proved PIN knowledge — and relayMessage would immediately start
+ * relaying to/from them anyway, because it only ever checked the STICKY,
+ * session-scoped verified flag, never "is this the same connection that
+ * earned it". A viewer already past the PIN gate had no way to tell the
+ * difference between the real host and an impostor who simply reconnected
+ * faster. Fix: onPeerGone (wired to webSocketClose/webSocketError, which the
+ * pre-fix implementation did not handle AT ALL — the DO did nothing when a
+ * socket disappeared) tears the PIN state back down to "unverified" and
+ * closes the other peer's socket — but NOT symmetrically for both roles;
+ * see onPeerGone's own doc for exactly why. In short: a HOST disconnect
+ * always resets everything (the host owns the PIN hash, so a reconnecting
+ * party — legitimate or not — must prove PIN knowledge again before any
+ * further signaling is relayed), while a VIEWER disconnect only resets
+ * anything if that viewer had ALREADY verified — an unverified viewer
+ * leaving (T1b's squatter-eviction case) must NOT disturb the host or the
+ * still-valid hash, or the very recovery flow T1b relies on breaks. An
+ * impostor who does not know the real PIN can register any hash they like
+ * for the 'host' role and it will never match what the real viewer types,
+ * so no relaying can begin. This is a live pairing, not a durable
+ * credential: it does not outlive the verified connections that formed it.
+ *
  * Runtime-bound; the live pairing/relay/hibernation path is verified at S18.
  */
 
@@ -68,6 +96,21 @@ function policyInt(raw: string | undefined, fallback: number): number {
 export class SessionDurableObject {
   private readonly mintLimiter: RateLimiter;
   private readonly pinMaxAttempts: number;
+  /**
+   * Serializes PIN-verify attempts so a read-then-write of PIN_ATTEMPTS_KEY
+   * can never interleave across two nearly-simultaneous guesses (SECURITY_AUDIT_20-08.md
+   * finding #5). A Durable Object instance is single-threaded but NOT
+   * single-request-at-a-time: two webSocketMessage invocations for two
+   * guesses submitted back-to-back can both read the same attempts value
+   * before either writes it back, because the async gaps in between (the
+   * SHA-256 digest, the storage read/write) are yield points where the
+   * runtime can interleave a second in-flight handler. Chaining every
+   * attempt behind an in-memory promise — scoped to this instance, which is
+   * exactly where the race lives — makes the whole read-check-write
+   * sequence atomic relative to other attempts on the SAME instance, with no
+   * new storage API needed.
+   */
+  private pinVerifyQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly state: DurableObjectState,
@@ -163,6 +206,100 @@ export class SessionDurableObject {
     await this.relayMessage(senderRole, message);
   }
 
+  /**
+   * Either peer's socket is gone (clean close, error, or the hibernation API
+   * evicting it — including this DO's OWN alarm() calling ws.close() on an
+   * unverified viewer, which the real hibernation API routes back through
+   * this same handler). Safe to call more than once (a close AND an error
+   * can both fire for the same socket) and safe if the socket was never
+   * tagged at all (e.g. a connection rejected as session-full before any
+   * role was assigned). See onPeerGone for why the two roles are NOT
+   * treated symmetrically — an early version of this fix was.
+   */
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    await this.onPeerGone(ws);
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    await this.onPeerGone(ws);
+  }
+
+  /**
+   * Tears down the live pairing when a peer disconnects — but ONLY as much
+   * as the host-role-hijack fix (class doc) actually requires, which is
+   * role-asymmetric:
+   *
+   *   - HOST gone: unconditionally reset ALL PIN state and close any
+   *     viewer. The host owns/registers the PIN hash, so whoever reconnects
+   *     to 'host' next — legitimate or not — must have a reconnecting
+   *     viewer re-earn verification against a hash THEY explicitly
+   *     register. This must hold even if no viewer had verified yet: a
+   *     stale, unchanged hash would otherwise still let an attacker
+   *     squatting the vacated host role benefit for free the moment a
+   *     genuine viewer later retries the SAME real PIN against it.
+   *
+   *   - VIEWER gone, but never verified: a no-op past freeing the slot.
+   *     This is T1b's squatter-eviction path (a link-only attacker with no
+   *     PIN, occupying the sole viewer slot, evicted by the alarm below OR
+   *     simply giving up) — nothing was ever trusted with this viewer, so
+   *     there is nothing to tear down, and the host must be left completely
+   *     undisturbed so it keeps waiting for the genuine viewer to retry
+   *     against the SAME still-valid hash. An earlier version of this fix
+   *     reset PIN state and closed the host on EVERY viewer disconnect,
+   *     which broke exactly this recovery path — a fresh adversarial pass
+   *     over the fix itself caught it (see SECURITY_AUDIT_20-08.md).
+   *
+   *   - VIEWER gone, already verified: the mirror of the host case. An
+   *     attacker who reclaims the now-vacant viewer slot must not silently
+   *     inherit a pairing that was verified for someone else, so this
+   *     clears PIN_VERIFIED_KEY (forcing re-verification) and closes the
+   *     host — but leaves PIN_HASH_KEY alone, since the still-connected
+   *     host is not compromised by its viewer disconnecting and a
+   *     reconnecting attacker still cannot produce a hash match without
+   *     knowing the real PIN.
+   */
+  private async onPeerGone(ws: WebSocket): Promise<void> {
+    const role = this.roleOf(ws);
+    if (role === null) {
+      return;
+    }
+    if (role === 'host') {
+      await this.resetPinState();
+      await this.state.storage.deleteAlarm();
+      this.closePeers(relayTargetRole(role));
+      return;
+    }
+    const wasVerified = (await this.state.storage.get<boolean>(PIN_VERIFIED_KEY)) === true;
+    if (!wasVerified) {
+      return;
+    }
+    await this.state.storage.delete(PIN_VERIFIED_KEY);
+    await this.state.storage.deleteAlarm();
+    this.closePeers(relayTargetRole(role));
+  }
+
+  private closePeers(role: PeerRole): void {
+    for (const peer of this.state.getWebSockets(role)) {
+      try { peer.close(4002, 'peer-disconnected'); } catch { /* already closed */ }
+    }
+  }
+
+  /** Drop every trace of the current PIN pairing: the hash, the attempt
+   *  counter, and any SDP/ICE buffered for a viewer that has not (or no
+   *  longer) proven PIN knowledge. Whoever reconnects — to either role —
+   *  must re-establish the pairing from scratch. */
+  private async resetPinState(): Promise<void> {
+    const pendingCount = (await this.state.storage.get<number>(PENDING_COUNT_KEY)) ?? 0;
+    const pendingKeys = Array.from({ length: pendingCount }, (_, i) => `${PENDING_PREFIX}${String(i)}`);
+    await Promise.all([
+      this.state.storage.delete(PIN_HASH_KEY),
+      this.state.storage.delete(PIN_VERIFIED_KEY),
+      this.state.storage.delete(PIN_ATTEMPTS_KEY),
+      this.state.storage.delete(PENDING_COUNT_KEY),
+      ...(pendingKeys.length > 0 ? [this.state.storage.delete(pendingKeys)] : []),
+    ]);
+  }
+
   private async relayMessage(senderRole: PeerRole, message: string | ArrayBuffer): Promise<void> {
     const pinVerified = (await this.state.storage.get<boolean>(PIN_VERIFIED_KEY)) === true;
 
@@ -212,7 +349,21 @@ export class SessionDurableObject {
     await this.state.storage.put(PIN_ATTEMPTS_KEY, this.pinMaxAttempts);
   }
 
-  private async handlePinVerify(ws: WebSocket, rawPin: string): Promise<void> {
+  /**
+   * Entry point for a PIN guess — serializes onto pinVerifyQueue (see that
+   * field's doc) before doing any real work, so the read-check-write of
+   * PIN_ATTEMPTS_KEY in doHandlePinVerify below can never race against a
+   * second guess submitted moments later.
+   */
+  private handlePinVerify(ws: WebSocket, rawPin: string): Promise<void> {
+    const attempt = this.pinVerifyQueue.then(() => this.doHandlePinVerify(ws, rawPin));
+    // Swallow here so one failed attempt never poisons the queue for the
+    // next one; doHandlePinVerify itself is total (never throws) regardless.
+    this.pinVerifyQueue = attempt.catch(() => undefined);
+    return attempt;
+  }
+
+  private async doHandlePinVerify(ws: WebSocket, rawPin: string): Promise<void> {
     const storedHash = await this.state.storage.get<string>(PIN_HASH_KEY);
     if (!storedHash) {
       ws.close(1008, 'pin-locked');

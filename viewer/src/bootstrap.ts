@@ -15,7 +15,7 @@
 
 import { readBrowserCapabilities } from './browser-capabilities.js';
 import { detectSupport } from './feature-detect.js';
-import { buildViewerSignalingUrl } from './viewer-url.js';
+import { buildViewerSignalingUrl, extractSessionCodeFromSearch } from './viewer-url.js';
 import { BrowserPeerAdapter } from './browser-peer.js';
 import { BrowserWebSocketAdapter } from './browser-signaling.js';
 import { ViewerConnection } from './viewer-connection.js';
@@ -52,6 +52,17 @@ declare global {
      * data (see connection-report.ts).
      */
     __beamConnection?: ConnectionFacts;
+    /**
+     * This tab's own session code, read directly by the injected WS shim
+     * (ws-shim.ts) running same-origin inside the tunneled-app iframe — the
+     * iframe forwards it straight back to the Service Worker as an
+     * 'iframe-owner' announcement so every fetch that document makes is
+     * attributed to THIS session, never to some other tab's (see sw.ts /
+     * sw-session-registry.ts and SECURITY_AUDIT_20-08.md finding #1). Set
+     * before the iframe is ever created, so it is always present by the time
+     * anything running inside it could ask.
+     */
+    __beamSessionCode?: string;
   }
 }
 
@@ -206,6 +217,8 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     root.textContent = renderFailed('no session code');
     return;
   }
+  // Set before the iframe exists — see the __beamSessionCode doc above.
+  window.__beamSessionCode = sessionCode;
 
   // Records how far the connection actually got, so a failure can say which
   // stage it died at instead of one generic message for every cause. Exposed
@@ -448,6 +461,14 @@ export async function bootstrap(signalingBaseUrl: string): Promise<void> {
     finalizeIfEstablished();
     const sw = navigator.serviceWorker.controller;
     if (!sw) return;
+    // 'mux-gone' first: drops this session's routing/bookkeeping from the SW
+    // registry so a stale sessionCode can never again resolve to this now-
+    // dead window (SECURITY_AUDIT_20-08.md finding #1) — the per-stream
+    // relay-error messages below are honored the same way either way, but
+    // sending this explicitly (rather than relying on the SW ever finding
+    // out some other way) is what makes a sequential SECOND session sharing
+    // this tab/SW safe, not just concurrent ones.
+    sw.postMessage(serializeSwMessage({ type: 'mux-gone', sessionCode }));
     for (const streamId of openStreamIds) {
       sw.postMessage(serializeSwMessage({ type: 'relay-error', streamId, reason: 'disconnect' }));
     }
@@ -692,21 +713,10 @@ function writeRelayFrame(mux: StreamMultiplexer, streamId: number, data: Uint8Ar
 /**
  * Extract session code from URL.
  * Checks ?session=<code> first, then last path segment of ?signaling=<url>/<code>.
+ * Shared with sw.ts's referrer-based resolution — see viewer-url.ts.
  */
 function extractSessionCode(): string | null {
-  const params = new URLSearchParams(window.location.search);
-
-  const direct = params.get('session');
-  if (direct && direct.length > 0) return direct;
-
-  const signalingUrl = params.get('signaling');
-  if (signalingUrl) {
-    const segments = signalingUrl.split('/').filter((s) => s.length > 0);
-    const last = segments[segments.length - 1];
-    if (last && /^[a-z0-9]{4,}$/.test(last)) return last;
-  }
-
-  return null;
+  return extractSessionCodeFromSearch(window.location.search);
 }
 
 /** `?ipv4=1` — set by the CLI on the printed viewer URL when --ipv4-only is passed. */

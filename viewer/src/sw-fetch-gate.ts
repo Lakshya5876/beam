@@ -127,9 +127,30 @@ export function trackStreamClose(streamId: number, gate: FetchGate): void {
   gate.openStreams.delete(streamId);
 }
 
-function make504(reason: string): Response {
+/**
+ * Escapes `reason` before it is interpolated into the 504 page's HTML
+ * (SECURITY_AUDIT_20-08.md finding #8). Every call site today only ever
+ * passes a fixed internal string or an OS-level error code (see relay-use-
+ * case.ts / replay-client.ts safeReason on the host side) — never anything
+ * peer- or attacker-supplied — so there is no known exploitable path as of
+ * this fix. It is applied anyway because this page renders as HTML in the
+ * viewer's own origin: an un-escaped template-literal interpolation here is
+ * one future refactor away from becoming a self-XSS vector (e.g. if an
+ * ERROR frame's free-text reason were ever echoed through un-sanitized),
+ * and defending it now costs nothing.
+ */
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+export function make504(reason: string): Response {
   return new Response(
-    `<html><body><h1>Beam: relay unavailable</h1><p>${reason}</p></body></html>`,
+    `<html><body><h1>Beam: relay unavailable</h1><p>${escapeHtml(reason)}</p></body></html>`,
     { status: 504, statusText: 'Gateway Timeout', headers: { 'content-type': 'text/html' } },
   );
 }

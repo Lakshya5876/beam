@@ -33,11 +33,55 @@ interface Bridge {
 declare global {
   interface Window {
     __beamWsBridge?: Bridge;
+    /** Set by the OUTER window (bootstrap.ts) before this iframe exists —
+     *  see announceIframeOwner below and that file's own doc comment. */
+    __beamSessionCode?: string;
   }
 }
 
 const BRIDGE_WAIT_TIMEOUT_MS = 5000;
 const BRIDGE_POLL_MS = 20;
+
+/**
+ * Tell the Service Worker which session this document belongs to, so every
+ * fetch it makes (this page's own XHR/fetch calls, and any later in-place
+ * navigation) is routed to the right session's DataChannel instead of
+ * whichever tab's mux the SW heard from most recently — the Critical
+ * cross-session relay hijack fixed by sw-session-registry.ts (see
+ * SECURITY_AUDIT_20-08.md finding #1). `window.parent.__beamSessionCode` is
+ * a same-origin, synchronous read (bootstrap.ts sets it before this iframe
+ * is ever created) — no postMessage handshake needed for THIS document's own
+ * announcement, only for re-announcing on request (see below).
+ *
+ * Runs once per page load, same as the WebSocket monkey-patch below — this
+ * script is injected fresh into every relayed HTML response, so a full-page
+ * navigation inside the iframe re-announces automatically with the new
+ * document's own (new) client id.
+ */
+function announceIframeOwner(): void {
+  const sessionCode = window.parent.__beamSessionCode;
+  const controller = navigator.serviceWorker.controller;
+  if (sessionCode && controller) {
+    controller.postMessage({ type: 'iframe-owner', sessionCode });
+  }
+}
+
+announceIframeOwner();
+
+// SW-restart recovery: a Service Worker instance can be terminated by the
+// browser while idle and restarted on the next fetch, losing its in-memory
+// session registry entirely (module state, not the pages themselves). The
+// restarted instance asks every window client to re-announce itself; this
+// document's own script already ran once at load and won't re-run on its
+// own, so it must listen and reply.
+if (navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const data = event.data as { type?: unknown } | null;
+    if (data && data.type === 'request-mux-ready') {
+      announceIframeOwner();
+    }
+  });
+}
 
 /**
  * The bridge is installed on the OUTER window once its DataChannel mux is

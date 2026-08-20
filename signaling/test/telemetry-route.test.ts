@@ -1,9 +1,18 @@
-import { describe, expect, it } from 'vitest';
-import { handleTelemetry, type AnalyticsDataPointLike, type TelemetryEnv } from '../src/telemetry-route.js';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { handleTelemetry, resetTelemetryRateLimiter, type AnalyticsDataPointLike, type TelemetryEnv } from '../src/telemetry-route.js';
 
-function post(body: unknown): Request {
+beforeEach(() => {
+  // The per-IP rate limiter is per-isolate module state (SECURITY_AUDIT_20-08.md
+  // finding #6) — reset it between tests so one test's call count never
+  // bleeds into the next's, and so the rate-limit tests below can drive it
+  // to its cap deterministically.
+  resetTelemetryRateLimiter();
+});
+
+function post(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request('http://example.com/telemetry', {
     method: 'POST',
+    headers,
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 }
@@ -202,5 +211,54 @@ describe('handleTelemetry — write failure never reaches the client', () => {
     const response = await handleTelemetry(post({ outcome: 'direct' }), throwingAnalytics());
     const body = await response.text();
     expect(body).not.toContain('Analytics Engine unavailable');
+  });
+});
+
+describe('handleTelemetry — per-IP rate limiting (SECURITY_AUDIT_20-08.md finding #6, Low)', () => {
+  it('rejects with 429 once an IP exceeds TELEMETRY_MAX_PER_MINUTE, without writing the over-limit request', async () => {
+    const { env, writes } = capturingAnalytics();
+    const limitedEnv: TelemetryEnv = { ...env, TELEMETRY_MAX_PER_MINUTE: '3' };
+    const headers = { 'cf-connecting-ip': '203.0.113.5' };
+
+    for (let i = 0; i < 3; i += 1) {
+      const response = await handleTelemetry(post({ outcome: 'direct' }, headers), limitedEnv);
+      expect(response.status).toBe(204);
+    }
+    const blocked = await handleTelemetry(post({ outcome: 'direct' }, headers), limitedEnv);
+
+    expect(blocked.status).toBe(429);
+    expect(writes).toHaveLength(3);
+  });
+
+  it('tracks each IP independently — one IP being rate-limited does not affect another', async () => {
+    const { env, writes } = capturingAnalytics();
+    const limitedEnv: TelemetryEnv = { ...env, TELEMETRY_MAX_PER_MINUTE: '1' };
+
+    const first = await handleTelemetry(post({ outcome: 'direct' }, { 'cf-connecting-ip': '203.0.113.5' }), limitedEnv);
+    const second = await handleTelemetry(post({ outcome: 'direct' }, { 'cf-connecting-ip': '203.0.113.5' }), limitedEnv);
+    const other = await handleTelemetry(post({ outcome: 'direct' }, { 'cf-connecting-ip': '198.51.100.9' }), limitedEnv);
+
+    expect(first.status).toBe(204);
+    expect(second.status).toBe(429);
+    expect(other.status).toBe(204);
+    expect(writes).toHaveLength(2);
+  });
+
+  it('defaults to a generous limit (60/min) when unconfigured, so normal single-beacon sessions are never affected', async () => {
+    const { env, writes } = capturingAnalytics();
+    const response = await handleTelemetry(post({ outcome: 'direct' }, { 'cf-connecting-ip': '203.0.113.5' }), env);
+    expect(response.status).toBe(204);
+    expect(writes).toHaveLength(1);
+  });
+
+  it('a rejected (429) request never reaches JSON parsing or the ANALYTICS binding', async () => {
+    const limitedEnv: TelemetryEnv = { TELEMETRY_MAX_PER_MINUTE: '1' };
+    const headers = { 'cf-connecting-ip': '203.0.113.5' };
+    await handleTelemetry(post({ outcome: 'direct' }, headers), limitedEnv);
+    // Second request is malformed JSON — if rate limiting ran AFTER parsing,
+    // this would 400; if it runs first (as it must), it 429s without ever
+    // looking at the body.
+    const response = await handleTelemetry(post('not json{', headers), limitedEnv);
+    expect(response.status).toBe(429);
   });
 });
