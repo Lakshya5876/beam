@@ -2,17 +2,17 @@
 
 Expose your localhost server to a remote browser peer over a direct WebRTC data channel — no cloud relay, no server costs, no account required.
 
-```
-npm install -g beam-tunnel
+## How to use?
 
+```bash
+npm install -g beam-tunnel   # one-time
+```
+
+```bash
 bm
-  Enter local URL (e.g. http://localhost:3000): 3000
-
-  Viewer URL:   https://beam-viewer.pages.dev/?signaling=...
-  Session code: 482 913
-
-  Share both with your viewer. Press Ctrl-C to end the session.
 ```
+
+Enter the local URL you want to expose (e.g. `http://localhost:3000`) when prompted, then share the printed viewer URL and session code with your viewer.
 
 The viewer opens the URL in a Chromium-based browser (Chrome, Edge — see Platform support below), enters the 6-digit code, and from that point every HTTP request they make is forwarded — peer-to-peer — to your local server and back, on their own machine, as if they were on yours.
 
@@ -65,21 +65,33 @@ see LIMITATIONS.md for the mechanism.
 
 Firefox has not been tested in this release.
 
+---
+
 ## Installation
 
 ```bash
-npm install -g beam-tunnel     # requires Node >= 22
-
-# From source
-git clone https://github.com/Lakshya5876/beam
-cd beam && npm ci && npm run build
+npm install -g beam-tunnel     # requires Node >= 22 — one-time
 ```
 
-> **Not yet published.** `beam-tunnel` is confirmed unclaimed on the npm registry as of the last check, but availability can change — re-verify (`npm view beam-tunnel`) immediately before running `npm publish`.
+That's it. `bm` is now on your PATH — every time after this, just run `bm`
+(see [Options](#options) below). There's no reinstalling, no re-cloning, nothing
+else to set up for day-to-day use.
+
+> **Don't use `npx beam-tunnel`.** On Windows it fails immediately with
+> `'bm' is not recognized as an internal or external command` — a confirmed,
+> root-caused `npx`-on-Windows issue, not a Beam bug (see
+> [LIMITATIONS.md](LIMITATIONS.md)). `npm install -g` is also the better fit
+> for a tool you'll run more than once: `npx` re-downloads the package on
+> every single invocation.
+
+**Updating** to a newer release: run `npm install -g beam-tunnel` again.
+
+**Building from source** is only needed if you're contributing to Beam
+itself, not to use it — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Usage
+## Options
 
 Run `bm` with no arguments and it asks for your local server address
 interactively — nothing to remember, nothing to look up:
@@ -106,7 +118,9 @@ Arguments:
 Options:
   --allowed-paths /a,/b    Restrict which URL paths the viewer may request.
                            An empty value (the default) exposes every route.
-  --ttl <seconds>          Session lifetime in seconds (default: no expiry).
+  --ttl <seconds>          Session lifetime in seconds (default: 4 hours,
+                           which is also the maximum — --ttl can only set
+                           it lower, never higher).
   --signaling <url>        Override the signaling server URL.
   --viewer <url>           Override the viewer base URL.
   --ice <urls>             Comma-separated ICE servers for the host peer,
@@ -165,6 +179,7 @@ bm 3000 --ipv4-only
 
 - **Authentication**: every session requires a 6-digit PIN. The host generates it locally (CSPRNG); only its SHA-256 hash is registered with the signaling server. A brute-force attempt against a 6-digit PIN succeeds with probability < 0.003 % on the first try.
 - **No signaling before verification**: the signaling Durable Object relays nothing — in either direction — until the PIN is verified. Holding the link alone is not enough to see or inject any WebRTC signaling. An unverified second connection to a session (someone who has the link but not the PIN) is evicted automatically after 2 minutes so it cannot permanently occupy the session and lock out the real viewer.
+- **No silent reconnection**: if either side's connection to the signaling server drops before the WebRTC handshake completes, that pairing is invalidated — whoever reconnects, including the real host, must re-register/re-enter the PIN before any further signaling is relayed. This closes off a "reconnect as the old peer" hijack window; the trade-off is that a genuine network blip mid-handshake means restarting `bm` rather than silently resuming. Once the peer-to-peer data channel is actually open, this no longer applies — the signaling server is out of the picture entirely at that point.
 - **Path restriction**: use `--allowed-paths` to limit exposure — it also gates WebSocket connections, not just HTTP. Without it, every route on the target port is reachable by anyone who holds the link and code.
 - **No relay after connection**: once the WebRTC data channel is open, no traffic transits the signaling server. Cloudflare Workers cannot read your data.
 - **Loopback confinement**: the host always connects to `127.0.0.1:<port>`, for both HTTP and WebSocket relay. Viewer-supplied headers cannot redirect requests to other hosts or ports.
