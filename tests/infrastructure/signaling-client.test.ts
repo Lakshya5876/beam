@@ -54,11 +54,23 @@ function makeClient(url: string, connectTimeoutMs?: number, maxInboundBytes?: nu
 }
 
 afterEach(async () => {
+  // client.disconnect() now genuinely waits for the native socket to finish
+  // closing (see signaling-client.ts) — this used to resolve immediately,
+  // which was the real cause of the CI-only cleanup deadlock this file's
+  // afterAll used to hit: many un-settled native close operations piling up
+  // across this file's many WebSocketSignalingClient instances by the time
+  // the global cleanup() ran.
   await Promise.all(signalingClients.map((client) => client.disconnect()));
   signalingClients.length = 0;
   if (server) {
     server.stop();
     server = null;
+    // WebSocketServer.stop() (node-datachannel's own class, not ours) is
+    // fire-and-forget with no completion callback of any kind exposed — this
+    // bounded wait is the only way available to give its native teardown a
+    // moment to actually finish before the next test (or afterAll's global
+    // cleanup) runs.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
   }
 });
 
