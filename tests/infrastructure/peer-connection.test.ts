@@ -1,5 +1,5 @@
-import nodeDataChannel from 'node-datachannel';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanupNativeOnce } from '../fixtures/native-cleanup.js';
 import {
   createFramePayload,
   createStreamId,
@@ -382,8 +382,14 @@ describe('PeerConnectionTransport — real node-datachannel (no ICE pairing)', (
     transports.length = 0;
   });
 
+  // Guarded (see fixtures/native-cleanup.ts) because tests/infrastructure/
+  // signaling-client.test.ts ALSO tears the library down, and calling the
+  // native cleanup() twice in the same process (Vitest's fork pool can batch
+  // both files into one forked process, notably on CI runners with fewer
+  // cores) deadlocks natively — this was an intermittent CI-only failure,
+  // never reproduced locally, precisely because of that batching mismatch.
   afterAll(() => {
-    nodeDataChannel.cleanup();
+    cleanupNativeOnce();
   });
 
   it('a real offerer emits an opaque SDP offer via onLocalDescription', async () => {

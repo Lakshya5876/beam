@@ -3,6 +3,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { WebSocketSignalingClient } from '../../src/infrastructure/signaling-client.js';
 import { createSessionCode, isInvalidSessionCodeError, type SessionCode } from '../../src/domain/session.js';
 import type { SignalingMessage } from '../../src/domain/interfaces.js';
+import { cleanupNativeOnce } from '../fixtures/native-cleanup.js';
 
 type DcWebSocket = InstanceType<typeof nodeDataChannel.WebSocket>;
 
@@ -62,9 +63,13 @@ afterEach(async () => {
 });
 
 // node-datachannel runs native threads; the worker must shut the library down
-// cleanly before it exits, or the fork crashes on teardown.
+// cleanly before it exits, or the fork crashes on teardown. Guarded (see
+// fixtures/native-cleanup.ts) because tests/infrastructure/peer-connection.test.ts
+// ALSO tears the library down, and calling the native cleanup() twice in the
+// same process (Vitest's fork pool can batch both files into one forked
+// process, notably on CI runners with fewer cores) deadlocks natively.
 afterAll(() => {
-  nodeDataChannel.cleanup();
+  cleanupNativeOnce();
 });
 
 function waitFor<T>(executor: (resolve: (value: T) => void) => void, timeoutMs = 3000): Promise<T> {
