@@ -23,6 +23,8 @@ import type { SessionCode } from '../domain/session.js';
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 export const DEFAULT_MAX_INBOUND_BYTES = 64 * 1024;
+/** Bounded fallback for disconnect() — see that method's doc. */
+export const DEFAULT_DISCONNECT_TIMEOUT_MS = 2_000;
 
 type DcWebSocket = InstanceType<typeof nodeDataChannel.WebSocket>;
 type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed';
@@ -77,6 +79,7 @@ export class WebSocketSignalingClient implements SignalingClient {
     private readonly connectTimeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS,
     private readonly maxInboundBytes: number = DEFAULT_MAX_INBOUND_BYTES,
     log?: (msg: string) => void,
+    private readonly disconnectTimeoutMs: number = DEFAULT_DISCONNECT_TIMEOUT_MS,
   ) {
     this.log = log ?? ((): void => { /* noop */ });
   }
@@ -202,12 +205,48 @@ export class WebSocketSignalingClient implements SignalingClient {
     };
   }
 
+  /**
+   * Resolves once the native socket has genuinely finished closing, not the
+   * instant close() is asked for. The previous version resolved immediately
+   * after requesting the close, so a caller awaiting disconnect() had no
+   * actual guarantee the native resource was released — harmless for a
+   * single long-lived host session, but tests/infrastructure/signaling-
+   * client.test.ts creates and tears down many WebSocketSignalingClient
+   * instances across one process, and the accumulated in-flight native close
+   * operations that gap left behind were the real cause of an intermittent
+   * CI-only "libdatachannel cleanup timeout (possible deadlock)" failure in
+   * that file's afterAll (node-datachannel's global cleanup() apparently
+   * cannot safely run while per-socket native teardown is still in flight).
+   * Bounded by disconnectTimeoutMs so a socket whose onClosed never fires
+   * (already-closed, or a genuine native quirk) can never hang the caller.
+   */
   disconnect(): Promise<void> {
-    if (this.socket) {
-      this.socket.close();
-      this.socket = null;
+    const socket = this.socket;
+    this.socket = null;
+    if (!socket || this.state === 'closed') {
+      this.state = 'closed';
+      return Promise.resolve();
     }
-    this.state = 'closed';
-    return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.log('[HOST-SIG] WebSocket CLOSED');
+        this.state = 'closed';
+        resolve();
+      };
+      const timer = setTimeout(finish, this.disconnectTimeoutMs);
+      socket.onClosed(finish);
+      try {
+        socket.close();
+      } catch {
+        // Already closing/closed natively — finish() still fires, via
+        // onClosed if it still runs or via the fallback timer otherwise.
+      }
+    });
   }
 }

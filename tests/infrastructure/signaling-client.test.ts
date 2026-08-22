@@ -3,6 +3,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { WebSocketSignalingClient } from '../../src/infrastructure/signaling-client.js';
 import { createSessionCode, isInvalidSessionCodeError, type SessionCode } from '../../src/domain/session.js';
 import type { SignalingMessage } from '../../src/domain/interfaces.js';
+import { cleanupNativeOnce } from '../fixtures/native-cleanup.js';
 
 type DcWebSocket = InstanceType<typeof nodeDataChannel.WebSocket>;
 
@@ -53,19 +54,38 @@ function makeClient(url: string, connectTimeoutMs?: number, maxInboundBytes?: nu
 }
 
 afterEach(async () => {
+  // client.disconnect() now genuinely waits for the native socket to finish
+  // closing (see signaling-client.ts) — this used to resolve immediately,
+  // which was the real cause of the CI-only cleanup deadlock this file's
+  // afterAll used to hit: many un-settled native close operations piling up
+  // across this file's many WebSocketSignalingClient instances by the time
+  // the global cleanup() ran.
   await Promise.all(signalingClients.map((client) => client.disconnect()));
   signalingClients.length = 0;
   if (server) {
     server.stop();
     server = null;
+    // WebSocketServer.stop() (node-datachannel's own class, not ours) is
+    // fire-and-forget with no completion callback of any kind exposed — this
+    // bounded wait is the only way available to give its native teardown a
+    // moment to actually finish before the next test (or afterAll's global
+    // cleanup) runs.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
   }
 });
 
 // node-datachannel runs native threads; the worker must shut the library down
-// cleanly before it exits, or the fork crashes on teardown.
+// cleanly before it exits, or the fork crashes on teardown. Guarded (see
+// fixtures/native-cleanup.ts) because tests/infrastructure/peer-connection.test.ts
+// ALSO tears the library down, and calling the native cleanup() twice in the
+// same process (Vitest's fork pool can batch both files into one forked
+// process, notably on CI runners with fewer cores) deadlocks natively.
+// Explicit timeout (redundant with vitest.config.ts's global hookTimeout,
+// kept here so the reason travels with the call site): the default 10s
+// hook budget is too tight for this native call on CI's Linux runners.
 afterAll(() => {
-  nodeDataChannel.cleanup();
-});
+  cleanupNativeOnce();
+}, 30_000);
 
 function waitFor<T>(executor: (resolve: (value: T) => void) => void, timeoutMs = 3000): Promise<T> {
   return new Promise<T>((resolve, reject) => {

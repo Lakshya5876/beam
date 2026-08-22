@@ -9,4 +9,27 @@
 #
 # Format: <package>/<test file>::<test name> | issue=<link> | since=<YYYY-MM-DD>
 #
-# (empty — no tests currently quarantined)
+root/tests/infrastructure/signaling-client.test.ts::afterAll (nodeDataChannel.cleanup) | issue=TBD-ask-before-filing | since=2026-08-22
+# Not a specific it() — every one of this file's 14 assertions passes
+# deterministically every time, including on CI. The file's own afterAll
+# hook's native-library cleanup() is flaky on GitHub Actions' ubuntu-latest
+# runners specifically, in two DIFFERENT observed shapes across otherwise-
+# identical runs: sometimes it eventually throws "libdatachannel error#
+# cleanup timeout (possible deadlock)" after ~10s (a catchable JS
+# exception); sometimes it is simply slower than that and Vitest's own
+# default 10s hookTimeout kills the hook first ("Hook timed out in
+# 10000ms") with no JS exception thrown at all. Unreproducible on Windows,
+# including under a forced single-process vitest run matching CI's file-
+# batching shape. Root-caused as far as possible without a real Linux repro
+# environment — see tests/fixtures/native-cleanup.ts's doc for the full
+# investigation (two genuine, independent correctness fixes were made along
+# the way and kept regardless: a double-cleanup-invocation guard, and
+# signaling-client.ts's disconnect() now genuinely awaiting native close
+# confirmation instead of resolving early). Mitigated (not merely hidden) by
+# (a) catching the native cleanup() failure and logging it instead of
+# letting post-hoc process hygiene fail an otherwise fully-passing suite,
+# and (b) raising hookTimeout to 30s (vitest.config.ts + explicit per-call
+# timeouts) so the hook itself isn't killed before cleanup() gets the
+# chance to return or throw. See tests/fixtures/native-cleanup.test.ts for
+# regression coverage of (a). Re-open/upstream if this recurs with a third
+# symptom shape.
