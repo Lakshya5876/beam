@@ -7,10 +7,10 @@ import nodeDataChannel from 'node-datachannel';
  * each need to shut the native library down when they're done — this is
  * the single shared call site for that.
  *
- * Investigation trail (all three steps were real, verifiable fixes to
- * genuine correctness gaps; none of them alone made CI green, which is
- * exactly why the actual fix below is defensive rather than "prevent the
- * cause"):
+ * Investigation trail (every step was a real, verifiable fix to a genuine
+ * correctness gap; none of them alone made CI green, because the underlying
+ * native flakiness shows up as two DIFFERENT failure shapes on different
+ * runs of the exact same code):
  *
  *   1. Guarded against double-invocation (`cleaned` flag below) — cleanup()
  *      is a bare, unguarded call into the native binding (node_modules/
@@ -27,28 +27,37 @@ import nodeDataChannel from 'node-datachannel';
  *      ran. Fixed to genuinely await the native onClosed confirmation. Also
  *      a real defect (a Promise resolving before its work is actually
  *      done), and also stays fixed regardless of the rest of this story.
- *   3. Neither (1) nor (2) made the failure stop recurring. The actual CI
- *      logs settled the question: every one of signaling-client.test.ts's
- *      14 tests passes — the LAST one completes normally — and only THEN
- *      does the file's afterAll spend ~10s in cleanup() before it throws
- *      "libdatachannel error# cleanup timeout (possible deadlock)". This
- *      is native-library teardown flakiness under CI's specific resource
- *      constraints (unreproducible on a Windows dev machine, including
- *      under a forced single-process run matching CI's batching shape —
- *      this is very likely Linux-specific libdatachannel thread-teardown
- *      behavior), not a bug in anything this repo's own code does. The
- *      exact same test files, unchanged, passed this same CI workflow two
- *      days earlier.
+ *   3. Neither (1) nor (2) made the failure stop recurring — the actual CI
+ *      logs showed EVERY one of signaling-client.test.ts's 14 tests passing
+ *      deterministically, every time, with the failure isolated entirely to
+ *      the file's afterAll. But that afterAll failed two DIFFERENT ways on
+ *      different runs of the identical code: sometimes cleanup() eventually
+ *      throws "libdatachannel error# cleanup timeout (possible deadlock)"
+ *      after ~10s (a genuine, catchable JS exception — this file's try/
+ *      catch below), and sometimes it is simply slower than Vitest's own
+ *      DEFAULT 10s hookTimeout, which kills the hook itself with "Hook
+ *      timed out in 10000ms" before cleanup() ever gets the chance to
+ *      throw or return — no JS exception is thrown in that case, so no
+ *      try/catch can address it; only a longer hookTimeout can (see
+ *      vitest.config.ts and this file's own afterAll call sites). Both
+ *      fixes are necessary; neither alone is sufficient. This is native-
+ *      library teardown flakiness under CI's specific resource constraints
+ *      (unreproducible on a Windows dev machine, including under a forced
+ *      single-process run matching CI's batching shape — this is very
+ *      likely Linux-specific libdatachannel thread-teardown behavior), not
+ *      a bug in anything this repo's own code does. The exact same test
+ *      files, unchanged, passed this same CI workflow two days earlier.
  *
  * cleanup()'s entire purpose is post-hoc process hygiene (the comment at
  * each call site: "the worker must shut the library down cleanly before it
  * exits, or the fork crashes on teardown") — it has no bearing on whether
- * any actual test assertion passed. Letting its own internal deadlock
- * detector's timeout fail an otherwise-100%-green suite is strictly worse
- * than accepting a noisier process exit, so a failure here is caught and
- * logged rather than propagated. If node-datachannel ever ships a fix for
- * the underlying native flakiness, this catch simply stops firing — nothing
- * else needs to change.
+ * any actual test assertion passed. Letting its own flakiness fail an
+ * otherwise-100%-green suite is strictly worse than accepting a noisier
+ * process exit, so a failure here is caught and logged rather than
+ * propagated (for the throwing case — the hung-past-hookTimeout case is
+ * handled by giving it more time to begin with). If node-datachannel ever
+ * ships a fix for the underlying native flakiness, this catch simply stops
+ * firing — nothing else needs to change.
  */
 let cleaned = false;
 

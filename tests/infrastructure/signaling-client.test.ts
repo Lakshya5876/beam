@@ -80,9 +80,12 @@ afterEach(async () => {
 // ALSO tears the library down, and calling the native cleanup() twice in the
 // same process (Vitest's fork pool can batch both files into one forked
 // process, notably on CI runners with fewer cores) deadlocks natively.
+// Explicit timeout (redundant with vitest.config.ts's global hookTimeout,
+// kept here so the reason travels with the call site): the default 10s
+// hook budget is too tight for this native call on CI's Linux runners.
 afterAll(() => {
   cleanupNativeOnce();
-});
+}, 30_000);
 
 function waitFor<T>(executor: (resolve: (value: T) => void) => void, timeoutMs = 3000): Promise<T> {
   return new Promise<T>((resolve, reject) => {

@@ -388,9 +388,12 @@ describe('PeerConnectionTransport — real node-datachannel (no ICE pairing)', (
   // both files into one forked process, notably on CI runners with fewer
   // cores) deadlocks natively — this was an intermittent CI-only failure,
   // never reproduced locally, precisely because of that batching mismatch.
+  // Explicit timeout (redundant with vitest.config.ts's global hookTimeout,
+  // kept here so the reason travels with the call site): the default 10s
+  // hook budget is too tight for this native call on CI's Linux runners.
   afterAll(() => {
     cleanupNativeOnce();
-  });
+  }, 30_000);
 
   it('a real offerer emits an opaque SDP offer via onLocalDescription', async () => {
     const transport = realOffer();
